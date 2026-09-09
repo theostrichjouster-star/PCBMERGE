@@ -1,9 +1,9 @@
 """The merge plan: every decision, written down and replayable.
 
 Answering the same net questions on every run would be miserable, so the tool
-separates deciding from doing.  A plan is JSON: which designs go in, what
-prefix each gets, and what happens to every contested net.  Edit it, commit it,
-feed it back.
+separates deciding from doing.  A plan is JSON: which designs go in, how many
+copies of each, what prefix they get, which nets join, and which differently
+named nets were tied together by hand.  Edit it, commit it, feed it back.
 """
 
 from __future__ import annotations
@@ -16,17 +16,39 @@ from pathlib import Path
 from .eagle import sanitize_name
 from .nets import Action, Kind, NetResolver
 
-PLAN_VERSION = 1
+PLAN_VERSION = 2
 
 
 @dataclass
 class DesignSpec:
-    """One input design: a schematic and, usually, its board."""
+    """One input design: a schematic, usually its board, and a copy count."""
 
     name: str
     prefix: str
     sch: str
     brd: str | None = None
+    count: int = 1
+
+    @property
+    def sch_path(self) -> Path:
+        return Path(self.sch)
+
+    @property
+    def brd_path(self) -> Path | None:
+        return Path(self.brd) if self.brd else None
+
+
+@dataclass
+class InstanceSpec:
+    """One copy of a design, after replication has been expanded."""
+
+    name: str      # unique instance name
+    source: str    # the DesignSpec it came from
+    prefix: str
+    sch: str
+    brd: str | None = None
+    index: int = 1
+    count: int = 1
 
     @property
     def sch_path(self) -> Path:
@@ -52,37 +74,50 @@ class NetDecision:
 
 
 @dataclass
+class LinkDecision:
+    """Two or more differently named nets tied into one."""
+
+    keys: list[str]
+    name: str = ""
+    note: str = ""
+
+
+@dataclass
 class MergePlan:
     output: str = "merged"
     title: str = "merged"
     designs: list[DesignSpec] = field(default_factory=list)
     nets: list[NetDecision] = field(default_factory=list)
-    layout: str = "grid"
+    links: list[LinkDecision] = field(default_factory=list)
+    layout: str = "pack"
+    optimize: str = "balanced"
     gap: float = 5.0
     columns: int = 0
+    sheet_layout: str = "per-design"
+    sheets_per_page: int = 1
     version: int = PLAN_VERSION
 
     # -- serialisation ------------------------------------------------------
     def to_json(self) -> str:
-        data = asdict(self)
-        return json.dumps(data, indent=2)
+        return json.dumps(asdict(self), indent=2)
 
     @classmethod
     def from_json(cls, text: str) -> "MergePlan":
         data = json.loads(text)
-        designs = [DesignSpec(**d) for d in data.get("designs", [])]
-        nets = [NetDecision(**n) for n in data.get("nets", [])]
-        plan = cls(
+        return cls(
             output=data.get("output", "merged"),
             title=data.get("title", "merged"),
-            designs=designs,
-            nets=nets,
-            layout=data.get("layout", "grid"),
+            designs=[DesignSpec(**d) for d in data.get("designs", [])],
+            nets=[NetDecision(**n) for n in data.get("nets", [])],
+            links=[LinkDecision(**l) for l in data.get("links", [])],
+            layout=data.get("layout", "pack"),
+            optimize=data.get("optimize", "balanced"),
             gap=float(data.get("gap", 5.0)),
             columns=int(data.get("columns", 0)),
+            sheet_layout=data.get("sheet_layout", "per-design"),
+            sheets_per_page=int(data.get("sheets_per_page", 1)),
             version=int(data.get("version", PLAN_VERSION)),
         )
-        return plan
 
     def save(self, path: str | Path) -> Path:
         path = Path(path)
@@ -101,6 +136,35 @@ class MergePlan:
                 return net
         return None
 
+    @property
+    def instances(self) -> list[InstanceSpec]:
+        return expand(self.designs)
+
+
+def expand(specs: list[DesignSpec]) -> list[InstanceSpec]:
+    """Turn copy counts into individual instances with numbered prefixes.
+
+    The copy number lives in the prefix, so every reference designator and
+    every design-local net name increments together and stays consistent
+    between the schematic and the board.
+    """
+    instances: list[InstanceSpec] = []
+    for spec in specs:
+        count = max(1, int(spec.count or 1))
+        base = spec.prefix.rstrip("_")
+        for index in range(1, count + 1):
+            if count == 1:
+                prefix = f"{base}_"
+                name = spec.name
+            else:
+                prefix = f"{base}{index}_"
+                name = f"{spec.name} #{index}"
+            instances.append(InstanceSpec(
+                name=name, source=spec.name, prefix=prefix,
+                sch=spec.sch, brd=spec.brd, index=index, count=count,
+            ))
+    return instances
+
 
 def design_name(path: Path) -> str:
     """A short, readable identity for a design, taken from its filename."""
@@ -118,9 +182,11 @@ def default_prefix(name: str, taken: set[str]) -> str:
     if len(words) > 1 and words[0].lower() in {"adafruit", "sparkfun", "seeed", "pimoroni"}:
         words = words[1:]
     candidates = []
-    if words:
-        joined = "".join(w[:4].upper() for w in words[:2])
-        candidates.append(joined)
+    if len(words) == 1:
+        # A single word has no initials to take, so keep it nearly whole.
+        candidates.append(words[0].upper()[:8])
+    elif words:
+        candidates.append("".join(w[:4].upper() for w in words[:2]))
         candidates.append("".join(w[0].upper() for w in words if w)[:6])
         candidates.append(words[0].upper()[:8])
     candidates.append(sanitize_name(name).upper()[:8])
@@ -140,30 +206,42 @@ def plan_from_resolver(
     designs: list[DesignSpec],
     output: str,
     title: str,
-    layout: str = "grid",
+    layout: str = "pack",
+    optimize: str = "balanced",
     gap: float = 5.0,
     columns: int = 0,
+    sheet_layout: str = "per-design",
+    sheets_per_page: int = 1,
 ) -> MergePlan:
     """Snapshot the resolver's current decisions as a plan."""
     nets: list[NetDecision] = []
     for group in resolver.all_groups():
         if group.kind is Kind.UNIQUE:
             continue  # nothing to decide, nothing to record
-        nets.append(
-            NetDecision(
-                key=group.key,
-                name=group.merged_name or group.display,
-                action=group.action.value,
-                kind=group.kind.value,
-                designs=group.designs,
-                spellings=group.spellings,
-                decided_by=group.decided_by,
-                note=_note_for(group),
-            )
-        )
+        nets.append(NetDecision(
+            key=group.key,
+            name=group.merged_name or group.display,
+            action=group.action.value,
+            kind=group.kind.value,
+            designs=group.designs,
+            spellings=group.spellings,
+            decided_by=group.decided_by,
+            note=_note_for(group),
+        ))
+
+    links: list[LinkDecision] = []
+    for target in sorted(resolver.linked_keys):
+        members = sorted({k for k, v in resolver.key_alias.items() if v == target} | {target})
+        links.append(LinkDecision(
+            keys=members,
+            name=resolver.link_names.get(target, target),
+            note="tied together by hand; no naming rule would match these",
+        ))
+
     return MergePlan(
-        output=output, title=title, designs=designs, nets=nets,
-        layout=layout, gap=gap, columns=columns,
+        output=output, title=title, designs=designs, nets=nets, links=links,
+        layout=layout, optimize=optimize, gap=gap, columns=columns,
+        sheet_layout=sheet_layout, sheets_per_page=sheets_per_page,
     )
 
 
@@ -176,19 +254,34 @@ def _note_for(group) -> str:
         return "auto-generated name, always kept separate"
     if group.kind is Kind.AMBIGUOUS:
         return "role-named rail; voltage differs between designs unless you say otherwise"
+    if group.kind is Kind.REPLICA:
+        return f"one net per copy unless it is common to all {group.design_count}"
     return "same name in several designs; join only if they are one node"
 
 
-def apply_plan(resolver: NetResolver, plan: MergePlan) -> list[str]:
-    """Push a plan's decisions into a resolver. Returns keys not found."""
+def apply_plan(resolver: NetResolver, plan: MergePlan,
+               default_action: Action = Action.SPLIT,
+               replica_action: Action = Action.SPLIT) -> list[str]:
+    """Push a plan's decisions into a resolver. Returns keys not found.
+
+    Links are applied first and force a regroup, because they change which
+    nets are in which group before any join or split decision can apply.
+    """
     missing: list[str] = []
+
+    if plan.links:
+        from .linking import apply_links
+
+        missing.extend(apply_links(resolver, [(l.keys, l.name) for l in plan.links]))
+        resolver.finalize(default_action=default_action, replica_action=replica_action)
+
     for decision in plan.nets:
         group = resolver.groups.get(decision.key)
         if group is None:
             missing.append(decision.key)
             continue
         group.action = Action(decision.action)
-        group.decided_by = "plan"
+        group.decided_by = decision.decided_by if decision.decided_by != "auto" else "plan"
         if group.action is Action.JOIN:
             group.merged_name = decision.name or group.display
     return missing

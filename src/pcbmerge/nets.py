@@ -3,8 +3,11 @@
 When two boards both have a net called GND, they mean the same wire and should
 become one.  When they both have N$1, they mean nothing in particular and must
 stay apart.  Between those extremes sit names like VCC or SDA, where only the
-engineer knows.  This module sorts every shared name into one of those three
-buckets and leaves the middle one for a human.
+engineer knows.
+
+Replication adds a fourth case.  Four copies of one relay board all have a net
+called SIGNAL, but they are four separate channels, so the copies are numbered
+apart unless you say the signal is common to all of them.
 """
 
 from __future__ import annotations
@@ -43,6 +46,7 @@ class Kind(str, Enum):
     RAIL = "rail"              # explicit-voltage or known rail, joined
     AMBIGUOUS = "ambiguous"    # role-named power, needs a decision
     SIGNAL = "signal"          # ordinary shared signal name, needs a decision
+    REPLICA = "replica"        # same name in several copies of one design
 
 
 class Action(str, Enum):
@@ -69,84 +73,168 @@ def normalize(name: str) -> str:
     return key
 
 
-def classify(name: str, design_count: int) -> Kind:
-    """Bucket a net name given how many designs use it."""
+def classify(name: str, source_count: int, instance_count: int) -> Kind:
+    """Bucket a net name.
+
+    `source_count` counts distinct input designs; `instance_count` counts the
+    copies those designs were expanded into.  The difference is what separates
+    a genuine cross-design clash from replication of a single board.
+    """
     if ANONYMOUS.match(name.strip()):
         return Kind.ANONYMOUS
-    if design_count < 2:
-        return Kind.UNIQUE
+
     key = normalize(name)
-    if key == "GND":
-        return Kind.GROUND
-    if key in KNOWN_RAILS:
-        return Kind.RAIL
-    if EXPLICIT_RAIL.fullmatch(key.lstrip("+")) or re.fullmatch(r"-?\d+V\d+", key):
-        return Kind.RAIL
-    if key in AMBIGUOUS_RAILS or name.strip().upper() in AMBIGUOUS_RAILS:
-        return Kind.AMBIGUOUS
-    return Kind.SIGNAL
+    if instance_count > 1:
+        # Rails are joined across copies as readily as across designs.
+        if key == "GND":
+            return Kind.GROUND
+        if key in KNOWN_RAILS or EXPLICIT_RAIL.fullmatch(key.lstrip("+")):
+            return Kind.RAIL
+
+    if source_count > 1:
+        if key in AMBIGUOUS_RAILS or name.strip().upper() in AMBIGUOUS_RAILS:
+            return Kind.AMBIGUOUS
+        return Kind.SIGNAL
+    if instance_count > 1:
+        return Kind.REPLICA
+    return Kind.UNIQUE
+
+
+@dataclass(frozen=True)
+class NetRef:
+    """One net, in one instance of one design."""
+
+    design: str   # instance name, unique across the merge
+    source: str   # the input design it was copied from
+    raw: str      # the net name as written in that file
 
 
 @dataclass
 class NetGroup:
-    """Every net across the inputs that shares one normalized name."""
+    """Every net across the inputs that shares one resolution key."""
 
-    key: str                                  # normalized name
-    display: str                              # preferred spelling
-    kind: Kind
-    occurrences: dict[str, list[str]] = field(default_factory=dict)  # design -> raw names
+    key: str
+    display: str
+    kind: Kind = Kind.UNIQUE
+    refs: list[NetRef] = field(default_factory=list)
     action: Action = Action.SPLIT
     merged_name: str = ""
-    decided_by: str = "auto"                  # auto | plan | prompt | flag
+    decided_by: str = "auto"   # auto | plan | prompt | link
+
+    @property
+    def occurrences(self) -> dict[str, list[str]]:
+        out: dict[str, list[str]] = {}
+        for ref in self.refs:
+            names = out.setdefault(ref.design, [])
+            if ref.raw not in names:
+                names.append(ref.raw)
+        return out
 
     @property
     def designs(self) -> list[str]:
         return list(self.occurrences)
 
     @property
+    def sources(self) -> list[str]:
+        out: list[str] = []
+        for ref in self.refs:
+            if ref.source not in out:
+                out.append(ref.source)
+        return out
+
+    @property
     def design_count(self) -> int:
-        return len(self.occurrences)
+        return len(self.designs)
+
+    @property
+    def source_count(self) -> int:
+        return len(self.sources)
 
     @property
     def spellings(self) -> list[str]:
         out: list[str] = []
-        for names in self.occurrences.values():
-            for n in names:
-                if n not in out:
-                    out.append(n)
+        for ref in self.refs:
+            if ref.raw not in out:
+                out.append(ref.raw)
         return out
 
     @property
     def needs_decision(self) -> bool:
         return self.kind in NEEDS_DECISION
 
+    @property
+    def is_replica_question(self) -> bool:
+        return self.kind is Kind.REPLICA
+
 
 class NetResolver:
     """Builds net groups from the loaded designs and applies a policy."""
 
     def __init__(self) -> None:
+        self.refs: list[NetRef] = []
         self.groups: dict[str, NetGroup] = {}
+        # Forced regrouping, from explicit links and accepted suggestions.
+        self.key_alias: dict[str, str] = {}
+        self.link_names: dict[str, str] = {}
+        self.linked_keys: set[str] = set()
 
-    def add(self, design: str, net_names: list[str]) -> None:
+    # -- input --------------------------------------------------------------
+    def add(self, design: str, net_names: list[str], source: str | None = None) -> None:
+        source = source or design
         for raw in net_names:
-            if not raw:
-                continue
-            key = normalize(raw)
+            if raw:
+                self.refs.append(NetRef(design=design, source=source, raw=raw))
+
+    def link(self, keys: list[str], name: str = "") -> str:
+        """Force several resolution keys to become one net.
+
+        This is how a net called SDA on one board is tied to one called
+        I2C_DATA on another, which no naming rule could have matched.
+        """
+        resolved = [self.key_alias.get(k, k) for k in keys if k]
+        if not resolved:
+            return ""
+        target = resolved[0]
+        absorbed = set(resolved[1:]) | set(keys)
+        absorbed.discard(target)
+
+        for key in absorbed:
+            self.key_alias[key] = target
+        # Anything that previously pointed at an absorbed key follows it over.
+        for key, value in list(self.key_alias.items()):
+            if value in absorbed:
+                self.key_alias[key] = target
+        self.key_alias.pop(target, None)
+
+        self.linked_keys.add(target)
+        self.linked_keys -= absorbed
+        if name:
+            self.link_names[target] = name
+        return target
+
+    # -- resolution ---------------------------------------------------------
+    def finalize(self, default_action: Action = Action.SPLIT,
+                 replica_action: Action = Action.SPLIT) -> None:
+        """Rebuild every group from the refs and set automatic decisions."""
+        self.groups = {}
+        for ref in self.refs:
+            key = self.key_alias.get(normalize(ref.raw), normalize(ref.raw))
             group = self.groups.get(key)
             if group is None:
-                group = NetGroup(key=key, display=raw, kind=Kind.UNIQUE)
+                group = NetGroup(key=key, display=ref.raw)
                 self.groups[key] = group
-            group.occurrences.setdefault(design, [])
-            if raw not in group.occurrences[design]:
-                group.occurrences[design].append(raw)
+            group.refs.append(ref)
 
-    def finalize(self, default_action: Action = Action.SPLIT) -> None:
-        """Classify every group and set the automatic decisions."""
         for group in self.groups.values():
-            group.kind = classify(group.display, group.design_count)
             group.display = _preferred_spelling(group)
-            if group.kind is Kind.UNIQUE:
-                # A name only one design uses carries over untouched.
+            group.kind = classify(group.display, group.source_count, group.design_count)
+
+            if group.key in self.linked_keys:
+                # An explicit link is a decision already made.
+                group.action = Action.JOIN
+                group.merged_name = self.link_names.get(group.key) or group.display
+                group.decided_by = "link"
+            elif group.kind is Kind.UNIQUE:
                 group.action = Action.JOIN
                 group.merged_name = group.display
             elif group.kind in AUTO_JOIN:
@@ -154,6 +242,10 @@ class NetResolver:
                 group.merged_name = group.display
             elif group.kind in AUTO_SPLIT:
                 group.action = Action.SPLIT
+            elif group.kind is Kind.REPLICA:
+                group.action = replica_action
+                if replica_action is Action.JOIN:
+                    group.merged_name = group.display
             else:
                 group.action = default_action
                 if group.action is Action.JOIN:
@@ -163,17 +255,25 @@ class NetResolver:
     def open_questions(self) -> list[NetGroup]:
         return sorted(
             (g for g in self.groups.values() if g.needs_decision),
-            key=lambda g: (-g.design_count, g.key),
+            key=lambda g: (-g.source_count, g.key),
+        )
+
+    def replica_questions(self) -> list[NetGroup]:
+        return sorted(
+            (g for g in self.groups.values() if g.is_replica_question),
+            key=lambda g: (g.sources[0] if g.sources else "", g.key),
         )
 
     def joined(self) -> list[NetGroup]:
-        return [g for g in self.groups.values() if g.action is Action.JOIN and g.design_count > 1]
+        return [g for g in self.groups.values()
+                if g.action is Action.JOIN and g.design_count > 1]
 
     def all_groups(self) -> list[NetGroup]:
         return sorted(self.groups.values(), key=lambda g: (-g.design_count, g.key))
 
     def group_for(self, raw_name: str) -> NetGroup | None:
-        return self.groups.get(normalize(raw_name))
+        key = normalize(raw_name)
+        return self.groups.get(self.key_alias.get(key, key))
 
 
 def _preferred_spelling(group: NetGroup) -> str:
@@ -184,17 +284,16 @@ def _preferred_spelling(group: NetGroup) -> str:
     """
     counts: dict[str, int] = {}
     order: dict[str, int] = {}
-    for names in group.occurrences.values():
-        for n in names:
-            counts[n] = counts.get(n, 0) + 1
-            order.setdefault(n, len(order))
+    for ref in group.refs:
+        counts[ref.raw] = counts.get(ref.raw, 0) + 1
+        order.setdefault(ref.raw, len(order))
     return sorted(counts, key=lambda n: (-counts[n], order[n]))[0]
 
 
 def plan_design_names(
     group: NetGroup, design: str, prefix: str, taken: set[str]
 ) -> dict[str, str]:
-    """Map one design's raw net names in this group to their merged names.
+    """Map one design instance's raw net names in this group to merged names.
 
     Two nets inside a single design are always distinct, even when they
     normalize alike -- a board carrying both `3.3V` and `+3V3` means two

@@ -11,17 +11,18 @@ from pcbmerge.cli import collect_specs, main
 from pcbmerge.eagle import EagleDoc, bbox, translate
 from pcbmerge.merge import build_resolver, load_designs, merge
 from pcbmerge.nets import Action
-from pcbmerge.plan import MergePlan, apply_plan, default_prefix
+from pcbmerge.plan import MergePlan, apply_plan, default_prefix, expand
 
 
-def run_merge(directory: Path, out: Path, default: Action = Action.SPLIT) -> tuple:
+def run_merge(directory: Path, out: Path, default: Action = Action.SPLIT,
+              layout: str = "grid", optimize: str = "none") -> tuple:
     specs = collect_specs([str(directory)])
-    designs = load_designs(specs)
+    designs = load_designs(expand(specs))
     resolver = build_resolver(designs)
     resolver.finalize(default_action=default)
-    plan = MergePlan(output="merged", designs=specs)
+    plan = MergePlan(output="merged", designs=specs, layout=layout, optimize=optimize)
     report = merge(designs, resolver, plan, out, "merged")
-    return report, specs
+    return report, [d.spec for d in designs]
 
 
 def test_merge_writes_a_consistent_pair(designs, tmp_path):

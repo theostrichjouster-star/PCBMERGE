@@ -4,6 +4,10 @@ The merge is driven entirely by rename maps computed up front: one for library
 items, one for reference designators, one for nets, one for net classes.  Both
 output files are then rebuilt using the same maps, which is what keeps the
 schematic and the board consistent enough for EAGLE to open them as a pair.
+
+A design may be instantiated more than once.  Each copy is an independent
+instance with its own numbered prefix, so parts and design-local nets increment
+together while shared rails still collapse into one net.
 """
 
 from __future__ import annotations
@@ -14,28 +18,37 @@ from pathlib import Path
 
 from . import layout
 from .eagle import (
-    EagleDoc, EagleError, clone, content_hash, strip_urns, tidy, translate,
-    unique_name,
+    EagleDoc, EagleError, bbox, clone, content_hash, strip_urns, tidy,
+    translate, unique_name,
 )
 from .libraries import LibraryMerger, apply_to_element, apply_to_part
 from .nets import Action, NetResolver, plan_design_names
-from .plan import DesignSpec, MergePlan
+from .plan import InstanceSpec, MergePlan
+
+# Devicesets that only draw a page border.  Packing several designs onto one
+# sheet has to drop them or the borders overlap into noise.
+FRAME_HINT = "FRAME"
 
 
 @dataclass
 class Design:
-    """One loaded input design and every rename that applies to it."""
+    """One loaded design instance and every rename that applies to it."""
 
-    spec: DesignSpec
+    spec: InstanceSpec
     sch: EagleDoc
     brd: EagleDoc | None = None
     part_map: dict[str, str] = field(default_factory=dict)
     net_map: dict[str, str] = field(default_factory=dict)
     class_map: dict[str, str] = field(default_factory=dict)
+    dropped_parts: set[str] = field(default_factory=set)
 
     @property
     def name(self) -> str:
         return self.spec.name
+
+    @property
+    def source(self) -> str:
+        return self.spec.source
 
     @property
     def prefix(self) -> str:
@@ -45,31 +58,43 @@ class Design:
 @dataclass
 class MergeReport:
     designs: list[str] = field(default_factory=list)
+    copies: dict[str, int] = field(default_factory=dict)
     parts: int = 0
     elements: int = 0
     sheets: int = 0
     signals: int = 0
     joined_nets: list[tuple[str, list[str]]] = field(default_factory=list)
+    linked_nets: list[tuple[str, list[str]]] = field(default_factory=list)
     renamed_parts: int = 0
     renamed_library_items: int = 0
     dropped_urns: int = 0
+    dropped_frames: int = 0
     placements: list[layout.Placement] = field(default_factory=list)
+    before: layout.LayoutStats | None = None
+    after: layout.LayoutStats | None = None
     warnings: list[str] = field(default_factory=list)
     sch_path: Path | None = None
     brd_path: Path | None = None
 
 
-def load_designs(specs: list[DesignSpec]) -> list[Design]:
+def load_designs(instances: list[InstanceSpec]) -> list[Design]:
+    """Load each instance, parsing every source file only once."""
+    cache: dict[str, EagleDoc] = {}
+
+    def get(path: Path, kind: str) -> EagleDoc:
+        key = str(path)
+        doc = cache.get(key)
+        if doc is None:
+            doc = EagleDoc.load(path)
+            if doc.kind != kind:
+                raise EagleError(f"{path.name}: expected a {kind} file")
+            cache[key] = doc
+        return doc
+
     designs: list[Design] = []
-    for spec in specs:
-        sch = EagleDoc.load(spec.sch_path)
-        if sch.kind != "sch":
-            raise EagleError(f"{spec.sch}: expected a schematic")
-        brd = None
-        if spec.brd_path is not None:
-            brd = EagleDoc.load(spec.brd_path)
-            if brd.kind != "brd":
-                raise EagleError(f"{spec.brd}: expected a board")
+    for spec in instances:
+        sch = get(spec.sch_path, "sch")
+        brd = get(spec.brd_path, "brd") if spec.brd_path is not None else None
         designs.append(Design(spec=spec, sch=sch, brd=brd))
     return designs
 
@@ -82,7 +107,7 @@ def build_resolver(designs: list[Design]) -> NetResolver:
             for name in design.brd.net_names():
                 if name not in names:
                     names.append(name)
-        resolver.add(design.name, names)
+        resolver.add(design.name, names, source=design.source)
     return resolver
 
 
@@ -100,6 +125,8 @@ class Merger:
 
     # -- planning -----------------------------------------------------------
     def prepare(self) -> None:
+        for design in self.designs:
+            self.report.copies[design.source] = self.report.copies.get(design.source, 0) + 1
         self._merge_libraries()
         self._map_parts()
         self._map_classes()
@@ -164,17 +191,21 @@ class Merger:
             for group in self.resolver.all_groups():
                 if design.name not in group.occurrences:
                     continue
-                mapping = plan_design_names(group, design.name, design.prefix, taken)
-                design.net_map.update(mapping)
+                design.net_map.update(
+                    plan_design_names(group, design.name, design.prefix, taken))
+
         for group in self.resolver.joined():
-            if group.action is Action.JOIN:
-                self.report.joined_nets.append(
-                    (group.merged_name or group.display, group.designs)
-                )
+            entry = (group.merged_name or group.display, group.designs)
+            if group.decided_by == "link":
+                self.report.linked_nets.append((entry[0], group.spellings))
+            self.report.joined_nets.append(entry)
 
     # -- schematic ----------------------------------------------------------
     def build_schematic(self) -> EagleDoc:
         base = self.designs[0].sch
+        packed = self.plan.sheet_layout == "packed" and self.plan.sheets_per_page > 1
+        tiles = self._sheet_tiles() if packed else {}
+
         root = ET.Element("eagle", {"version": base.version})
         root.text = "\n"
         drawing = ET.SubElement(root, "drawing")
@@ -197,27 +228,43 @@ class Merger:
 
         parts = ET.SubElement(schematic, "parts")
         parts.text = "\n"
-        sheets = ET.SubElement(schematic, "sheets")
-        sheets.text = "\n"
+        sheets_node = ET.SubElement(schematic, "sheets")
+        sheets_node.text = "\n"
+
+        if packed:
+            self._mark_frames_dropped(tiles)
 
         for design in self.designs:
             renames = self.libs.renames_by_design[design.name]
             for part in design.sch.parts():
+                original = part.get("name", "")
+                if original in design.dropped_parts:
+                    continue
                 node = clone(part)
-                node.set("name", design.part_map.get(part.get("name", ""), part.get("name", "")))
+                node.set("name", design.part_map.get(original, original))
                 apply_to_part(node, renames)
                 parts.append(node)
                 self.report.parts += 1
-            for index, sheet in enumerate(design.sch.sheets()):
-                sheets.append(self._build_sheet(design, sheet, index))
-                self.report.sheets += 1
+
+        if packed:
+            pages = self._packed_sheets(tiles)
+        else:
+            pages = []
+            for design in self.designs:
+                for index, sheet in enumerate(design.sch.sheets()):
+                    pages.append(self._build_sheet(design, sheet, index))
+
+        for page in pages:
+            sheets_node.append(page)
+            self.report.sheets += 1
 
         doc = EagleDoc(path=Path("merged.sch"), tree=ET.ElementTree(root), kind="sch")
         self.report.dropped_urns += strip_urns(root)
         tidy(root)
         return doc
 
-    def _build_sheet(self, design: Design, sheet: ET.Element, index: int) -> ET.Element:
+    def _build_sheet(self, design: Design, sheet: ET.Element, index: int,
+                     offset: tuple[float, float] = (0.0, 0.0)) -> ET.Element:
         node = ET.Element("sheet")
         node.text = "\n"
         node.tail = "\n"
@@ -226,18 +273,30 @@ class Merger:
         description.text = label
         description.tail = "\n"
 
+        body = self._sheet_body(design, sheet, offset)
+        for child_node in body:
+            node.append(child_node)
+        return node
+
+    def _sheet_body(self, design: Design, sheet: ET.Element,
+                    offset: tuple[float, float]) -> list[ET.Element]:
+        """The plain / instances / busses / nets of one design's sheet."""
+        out: list[ET.Element] = []
         for tag in ("plain", "moduleinsts", "instances", "busses"):
             source = sheet.find(tag)
             copy = clone(source) if source is not None else ET.Element(tag)
             if tag == "instances":
-                for instance in copy:
+                for instance in list(copy):
                     if not isinstance(instance.tag, str):
                         continue
                     part = instance.get("part", "")
+                    if part in design.dropped_parts:
+                        copy.remove(instance)
+                        continue
                     instance.set("part", design.part_map.get(part, part))
-            node.append(copy)
+            out.append(copy)
 
-        nets = ET.SubElement(node, "nets")
+        nets = ET.Element("nets")
         nets.text = "\n"
         source_nets = sheet.find("nets")
         if source_nets is not None:
@@ -250,7 +309,12 @@ class Merger:
                 copy.set("class", design.class_map.get(net.get("class", "0"), "0"))
                 self._rewrite_net_body(copy, design)
                 nets.append(copy)
-        return node
+        out.append(nets)
+
+        if offset != (0.0, 0.0):
+            for node in out:
+                translate(node, offset[0], offset[1])
+        return out
 
     def _rewrite_net_body(self, net: ET.Element, design: Design) -> None:
         """Point every pin reference inside a net at its renamed part.
@@ -261,6 +325,90 @@ class Merger:
             part = pinref.get("part", "")
             pinref.set("part", design.part_map.get(part, part))
 
+    # -- schematic packing --------------------------------------------------
+    def _sheet_tiles(self) -> dict[str, tuple[int, float, float]]:
+        """Where each design's drawing goes when several share a sheet."""
+        sizes: list[tuple[str, float, float]] = []
+        for design in self.designs:
+            box = self._sheet_extent(design)
+            sizes.append((design.name, box[2] - box[0], box[3] - box[1]))
+        return layout.sheet_tiles(sizes, self.plan.sheets_per_page, gap=25.4)
+
+    def _sheet_extent(self, design: Design) -> tuple[float, float, float, float]:
+        """Bounds of a design's schematic, ignoring its page border."""
+        probe = ET.Element("probe")
+        frames = self._frame_parts(design)
+        for sheet in design.sch.sheets():
+            instances = sheet.find("instances")
+            if instances is not None:
+                for instance in instances:
+                    if isinstance(instance.tag, str) and instance.get("part") not in frames:
+                        probe.append(instance)
+            nets = sheet.find("nets")
+            if nets is not None:
+                probe.append(nets)
+        box = bbox(probe)
+        return box or (0.0, 0.0, 0.0, 0.0)
+
+    def _frame_parts(self, design: Design) -> set[str]:
+        """Parts whose deviceset only draws a page border."""
+        out: set[str] = set()
+        for part in design.sch.parts():
+            if FRAME_HINT in (part.get("deviceset", "") or "").upper():
+                out.add(part.get("name", ""))
+        return out
+
+    def _mark_frames_dropped(self, tiles: dict[str, tuple[int, float, float]]) -> None:
+        """Discard page borders for designs that now share a sheet."""
+        crowded = {index for index, _, _ in tiles.values()}
+        counts = {i: 0 for i in crowded}
+        for _, (index, _, _) in tiles.items():
+            counts[index] += 1
+        for design in self.designs:
+            sheet_index = tiles.get(design.name, (0, 0.0, 0.0))[0]
+            if counts.get(sheet_index, 1) > 1:
+                frames = self._frame_parts(design)
+                design.dropped_parts |= frames
+                self.report.dropped_frames += len(frames)
+
+    def _packed_sheets(self, tiles: dict[str, tuple[int, float, float]]) -> list[ET.Element]:
+        """Build sheets that hold more than one design each."""
+        pages: dict[int, ET.Element] = {}
+        labels: dict[int, list[str]] = {}
+
+        for design in self.designs:
+            sheet_index, tile_x, tile_y = tiles.get(design.name, (0, 0.0, 0.0))
+            box = self._sheet_extent(design)
+            offset = (tile_x - box[0], tile_y - box[1])
+
+            page = pages.get(sheet_index)
+            if page is None:
+                page = ET.Element("sheet")
+                page.text = "\n"
+                page.tail = "\n"
+                description = ET.SubElement(page, "description")
+                description.tail = "\n"
+                for tag in ("plain", "instances", "busses", "nets"):
+                    node = ET.SubElement(page, tag)
+                    node.text = "\n"
+                    node.tail = "\n"
+                pages[sheet_index] = page
+                labels[sheet_index] = []
+            labels[sheet_index].append(design.name)
+
+            for source_sheet in design.sch.sheets():
+                body = self._sheet_body(design, source_sheet, offset)
+                for part in body:
+                    target = page.find(part.tag)
+                    if target is None:
+                        continue
+                    for node in list(part):
+                        target.append(node)
+
+        for index, page in pages.items():
+            page.find("description").text = ", ".join(labels[index])
+        return [pages[i] for i in sorted(pages)]
+
     # -- board --------------------------------------------------------------
     def build_board(self) -> EagleDoc | None:
         boards = [d for d in self.designs if d.brd is not None]
@@ -268,12 +416,7 @@ class Merger:
             return None
         base = boards[0].brd
 
-        placements = layout.arrange(
-            [(d.name, d.brd.section) for d in boards],
-            style=self.plan.layout,
-            gap=self.plan.gap,
-            columns=self.plan.columns,
-        )
+        placements = self._place(boards)
         by_design = {p.design: p for p in placements}
         self.report.placements = placements
 
@@ -364,6 +507,47 @@ class Merger:
         tidy(root)
         return doc
 
+    def _place(self, boards: list[Design]) -> list[layout.Placement]:
+        """Choose where each board goes, optimising if asked to."""
+        measured = layout.measure([(d.name, d.brd.section) for d in boards])
+        centroids = {d.name: self._net_centroids(d) for d in boards}
+
+        placements, before, after = layout.optimize(
+            measured, centroids,
+            style=self.plan.layout, gap=self.plan.gap, columns=self.plan.columns,
+            goal=self.plan.optimize,
+        )
+        self.report.before = before
+        self.report.after = after
+        return placements
+
+    def _net_centroids(self, design: Design) -> dict[str, tuple[float, float]]:
+        """Where each merged net sits on this board, in its own coordinates.
+
+        Element origins stand in for pad positions.  That is accurate enough
+        to rank arrangements, and avoids resolving every package's pad
+        geometry through its rotation.
+        """
+        origins: dict[str, tuple[float, float]] = {}
+        for element in design.brd.elements():
+            try:
+                origins[element.get("name", "")] = (
+                    float(element.get("x", "0")), float(element.get("y", "0")))
+            except ValueError:
+                continue
+
+        out: dict[str, tuple[float, float]] = {}
+        for signal in design.brd.signals():
+            points = [origins[c.get("element", "")]
+                      for c in signal.iterfind(".//contactref")
+                      if c.get("element", "") in origins]
+            if not points:
+                continue
+            name = design.net_map.get(signal.get("name", ""), signal.get("name", ""))
+            out[name] = (sum(p[0] for p in points) / len(points),
+                         sum(p[1] for p in points) / len(points))
+        return out
+
     # -- shared pieces ------------------------------------------------------
     def _merged_layers(self) -> ET.Element:
         """Union of every layer definition, keyed by layer number."""
@@ -402,10 +586,10 @@ class Merger:
                 value = attribute.get("value", "")
                 if name in seen:
                     if seen[name] != value:
-                        self.report.warnings.append(
-                            f"global attribute {name} differs between designs; "
-                            f"kept {seen[name]!r}, dropped {value!r}"
-                        )
+                        message = (f"global attribute {name} differs between designs; "
+                                   f"kept {seen[name]!r}, dropped {value!r}")
+                        if message not in self.report.warnings:
+                            self.report.warnings.append(message)
                     continue
                 seen[name] = value
                 node.append(clone(attribute))

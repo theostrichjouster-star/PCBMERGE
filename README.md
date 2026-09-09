@@ -5,10 +5,17 @@ net names automatically where the answer is certain and asking where it is not.
 
 Point it at a folder of `.sch`/`.brd` pairs and it produces one merged pair that
 EAGLE will open: every part renamed apart, every library conflict preserved, the
-source boards tiled side by side, and the power rails already tied together.
+source boards packed into a compact arrangement, and the power rails already tied
+together.
 
 ```bash
 pcbmerge merge examples/adafruit -o combo --out-dir out
+```
+
+Place several copies of a design by appending `*N`:
+
+```bash
+pcbmerge merge controller.sch relay.sch*4 -o farm --out-dir out
 ```
 
 ## The problem it solves
@@ -29,13 +36,14 @@ each other, which is what EAGLE requires before it will let you route anything.
 
 ## How nets are resolved
 
-Every net name is sorted into one of three buckets.
+Every net name is sorted into one of four buckets.
 
 | Bucket | Examples | What happens |
 | --- | --- | --- |
 | Joined automatically | `GND`, `VSS`, `0V`, `3.3V`, `+3V3`, `5V`, `VBUS` | One net across all designs |
 | Kept separate always | `N$1`, `N$7` | Renamed per design, never fused |
 | Asked about | `VCC`, `VDD`, `VIN`, `AGND`, `SDA`, `SCL`, `D+` | You decide |
+| Asked about, per copy | any net in a replicated design | One per copy, or common to all |
 
 The rule behind the split is whether the name states its own meaning. `GND` and
 `3.3V` do, so matching names are safe to join. `VCC` names a role instead of a
@@ -49,6 +57,116 @@ most, with ties going to the design you listed first.
 Two nets inside a *single* design are never fused, even when they normalize alike.
 A board carrying both `3.3V` and `+3V3` has two nodes, and it keeps two.
 
+## Placing copies of a design
+
+Four relay boards on one panel is four instances of one file. Each copy gets a
+numbered prefix, so `R1` becomes `RELAY1_R1` through `RELAY4_R1`, and the same
+number carries onto the nets: `SIGNAL` becomes `RELAY1_SIGNAL` and so on. Parts,
+nets and footprints all increment together, which is what keeps the schematic and
+the board consistent.
+
+Rails are the exception. `GND` and `3.3V` stay a single net across every copy,
+because a name that states its own voltage means the same node wherever it appears.
+
+Everything else is a question, asked once per design rather than once per copy:
+
+```
+Adafruit_INA3221_Breakout: 3 copies.
+Which of these signals are common to all copies?
+Anything you do not pick becomes one net per copy.
+
+   1  ALERT
+   2  SCL
+   3  SDA
+   4  WARNING
+
+  numbers, 'a' for all, Enter for none: 2 3
+```
+
+Three copies of a current sensor share one I2C bus but have three separate alert
+lines. Three copies of a relay board share nothing but power. No rule can tell those
+apart, so the tool lists the candidates and lets you pick.
+
+Use `--replicas join` to make every replicated net common without being asked, or
+`--replicas split`, the default, to keep them all separate.
+
+## Connecting nets that are not spelled alike
+
+Name matching only finds the easy cases. A sensor board calling its bus `I2C_DATA`
+and a controller calling it `SDA` describe the same wire, and no normalisation rule
+will discover that. pcbmerge scores likely pairs and offers them:
+
+```
+[1/2]  confidence 78%
+  SDA                  Adafruit_INA3221_Breakout
+  I2C_DATA             Adafruit_ESP32-S3_8MB_No_PSRAM
+  why      same words plus I2C
+  connect these? [n] y/n/rename
+```
+
+The scorer is deliberately conservative, because a wrong suggestion costs more
+attention than a missed one. A missed connection stays visible as an unrouted net,
+while a wrong one has to be spotted and undone. Connector pin labels like `A0` and
+`D13` are never matched against each other, since they name a position rather than a
+signal. On the eight sample designs it proposes two pairs, not dozens.
+
+Answers default to no. To skip these questions entirely, pass `--no-suggest`.
+
+You can also state connections outright, which is what a plan records:
+
+```bash
+pcbmerge merge examples/adafruit --link SDA=I2C_DATA:BUS_SDA --link SCL=I2C_CLK
+```
+
+A link naming a net no design has is an error rather than a silent no-op, because
+linking a real net to a typo would quietly join the real one everywhere.
+
+## Board placement
+
+Source boards are packed rather than dropped into uniform cells, then the
+arrangement is searched for one that is both compact and short on airwires. Boards
+sharing many nets end up adjacent.
+
+```
+Board layout
+                 size (mm)    fill   airwire (mm)
+  start       76.1 x  112.8     57%            549
+  chosen      64.7 x  112.8     67%            420
+  11 improvement(s) over 4000 tries; airwire 129 mm shorter, board 1289 mm2 smaller
+```
+
+Airwire length is measured as a minimum spanning tree over each net's pad positions,
+which is the cheapest set of hops a router could use. Board element origins stand in
+for exact pad locations. That is accurate enough to rank arrangements, and much
+cheaper than resolving every footprint's pad geometry through its rotation.
+
+Control it with `--optimize`:
+
+| Value | Minimises |
+| --- | --- |
+| `balanced` | both, weighted toward airwire (default) |
+| `airwire` | connection length only |
+| `area` | board area only |
+| `none` | nothing, keeps input order |
+
+Pick the tiling with `--layout pack` (default), `row`, `column`, or `grid` for
+uniform cells.
+
+## Schematic layout
+
+By default each design instance gets its own sheet, named after the design, with its
+original coordinates untouched. Because EAGLE treats one net name as one net across
+all sheets, joining a rail needs no wires drawn between pages.
+
+Small designs can share a page instead:
+
+```bash
+pcbmerge merge examples/adafruit --sheet-layout packed --sheets-per-page 4
+```
+
+That tiles four designs per sheet and drops the page borders that would otherwise
+overlap, turning eight sheets into two.
+
 ## Commands
 
 ### inspect
@@ -59,12 +177,13 @@ See what would happen before anything is written.
 pcbmerge inspect examples/adafruit
 ```
 
-Reports each design's part and net counts, the library items that will need
-renaming, the nets that will join automatically, and the ones needing a decision.
+Reports each design's copy count and prefix, the library items that will need
+renaming, the nets that will join automatically, the ones needing a decision, and
+the differently named nets that might belong together.
 
 ### merge
 
-Do the work. Without `--yes` it asks about contested nets one at a time.
+Do the work. Without `--yes` it asks about links, copies and contested nets.
 
 ```bash
 pcbmerge merge examples/adafruit -o combo --out-dir out
@@ -83,9 +202,14 @@ to apply the default to everything remaining.
 
 Useful flags:
 
-- `--yes` never ask, take `--default` for everything contested
+- `--yes` never ask, take the defaults for everything contested
 - `--default join|split` what "everything contested" means, default `split`
-- `--layout grid|row|column`, `--gap 5`, `--columns 3` how source boards are tiled
+- `--replicas join|split` whether nets are common across copies, default `split`
+- `--ask-counts` ask how many copies of each design to place
+- `--link A=B:NAME` tie differently named nets together
+- `--no-suggest` skip the differently-named-net questions
+- `--layout pack|grid|row|column` and `--optimize balanced|airwire|area|none`
+- `--gap 5`, `--columns 3`, `--sheet-layout packed`, `--sheets-per-page 4`
 - `--prefix LEFT --prefix RIGHT` choose reference-designator prefixes yourself
 - `--save-plan used.json` record the answers you gave
 
@@ -116,6 +240,18 @@ Each entry says what it is and why:
 Change `action` to `join` and set `name` to whatever the merged net should be
 called. Re-running with the same plan gives the same output every time.
 
+A plan also carries copy counts, hand-made links, and the layout settings:
+
+```json
+{
+  "designs": [{"name": "relay", "prefix": "RELAY_", "sch": "relay.sch", "count": 4}],
+  "links": [{"keys": ["SDA", "I2C_DATA"], "name": "BUS_SDA"}],
+  "layout": "pack",
+  "optimize": "balanced",
+  "sheet_layout": "per-design"
+}
+```
+
 ### check
 
 Verify a `.sch`/`.brd` pair references nothing that does not exist. Works on any
@@ -128,18 +264,16 @@ pcbmerge check out/combo
 
 ## What the merged files look like
 
-**Schematic.** Each input becomes its own sheet, named after the design it came
-from. Sheet coordinates are untouched, so every page looks exactly as it did.
-Because EAGLE treats one net name as one net across all sheets, joining a rail
-needs no wires drawn between pages.
+**Schematic.** Each design instance becomes its own sheet, named after the design it
+came from, unless you pack several per page.
 
-**Board.** Source boards are tiled into a grid with a configurable gap, each moved
-as a rigid body so relative placement, rotation and routing survive intact. Joined
-nets appear as airwires spanning the sub-boards, which is the list of connections
-you still have to route.
+**Board.** Source boards are tiled into a packed arrangement, each moved as a rigid
+body so relative placement, rotation and routing survive intact. Joined nets appear
+as airwires spanning the sub-boards, which is the list of connections you still have
+to route.
 
 **Names.** Every part gets a short prefix from its design, so `R1` becomes
-`ESP3S3_R1`. Library items that clash by name but differ in content are kept side
+`ESP32S3_R1`. Library items that clash by name but differ in content are kept side
 by side as `0603` and `0603$2`, with every reference rewritten to point at the copy
 its own design was drawn with.
 
@@ -154,8 +288,8 @@ The merged board is a starting point, not a finished layout. After opening it:
 1. Run ERC on the schematic and DRC on the board.
 2. Look at the airwires. Those are the joined nets, currently unrouted between
    sub-boards.
-3. Move the sub-boards into the arrangement you actually want, then draw a single
-   outline on the Dimension layer and delete the inherited ones.
+3. Adjust the arrangement if you want, then draw a single outline on the Dimension
+   layer and delete the inherited ones.
 
 ## Install
 
@@ -173,6 +307,8 @@ Run the tests with `pip install -e ".[dev]"` then `pytest`.
 - Design rules, autorouter settings and global attributes come from the first
   design; conflicts elsewhere are reported as warnings, not merged.
 - Buses are copied per sheet but never joined across designs.
+- Placement search permutes which board goes where. It does not rotate boards or
+  attempt non-rectangular nesting.
 - The board outline is not recomputed. Each source outline is carried over in
   place, so you get several rectangles rather than one board shape.
 - Copper is never re-routed. Joined nets are left as airwires on purpose.

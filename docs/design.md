@@ -12,26 +12,45 @@ you route.
 | `eagle.py` | Load, save and transform EAGLE XML. Coordinate translation, content hashing, name sanitising. |
 | `libraries.py` | Merge library sets, renaming items that clash by name but differ in content. |
 | `nets.py` | Classify net names and decide join or split. |
-| `layout.py` | Measure source boards and tile them without overlap. |
+| `linking.py` | Propose connections between differently named nets. |
+| `layout.py` | Measure boards, pack them, and search for a cheaper arrangement. |
 | `plan.py` | Serialise every decision to JSON so a merge is replayable. |
-| `prompt.py` | Ask about the nets that rules cannot settle. |
+| `prompt.py` | Ask about copies, replicas, contested nets and links. |
 | `merge.py` | Apply the maps and build the two output documents. |
 | `cli.py` | `inspect`, `plan`, `merge`, `check`. |
 
+## Designs and instances
+
+A `DesignSpec` is an input file with a copy count. `expand()` turns it into
+`InstanceSpec` objects, one per copy, each carrying a numbered prefix and a `source`
+naming the design it came from.
+
+That `source` field does real work. It is what separates a genuine cross-design
+clash from replication: four copies of one board share every net name by
+construction, which is not the same situation as two different boards happening to
+both use `SDA`. `NetGroup` therefore reports `design_count` and `source_count`
+separately, and `classify()` takes both.
+
+Instances of the same file share one parsed document. Every consumer clones before
+mutating, so the sharing is invisible and eight copies cost one parse.
+
 ## The four maps
 
-Every design carries four rename maps, all built before a single output element is
-written.
+Every design instance carries four rename maps, all built before a single output
+element is written.
 
-1. **Library renames.** Per design, keyed by `(library, item name)`. Built by
+1. **Library renames.** Per instance, keyed by `(library, item name)`. Built by
    `LibraryMerger` in dependency order: packages, then symbols, then devicesets,
    because a deviceset references both.
-2. **Reference designators.** `R1` to `ESP3S3_R1`, applied identically to schematic
+2. **Reference designators.** `R1` to `RELAY2_R1`, applied identically to schematic
    parts and board elements so the two files keep matching.
 3. **Nets.** Raw net name to merged net name, applied to schematic nets and board
    signals alike.
 4. **Net classes.** Class numbers are per-file and start at zero in every design, so
    they are merged by content and renumbered.
+
+Because the copy number lives in the prefix, parts and design-local nets increment
+together automatically. There is no separate numbering scheme to keep in sync.
 
 ## Library merging
 
@@ -54,22 +73,51 @@ all become `3V3`, and `GND`, `VSS`, `0V` and `GROUND` all become `GND`.
 
 `classify()` then buckets the key by how self-describing it is:
 
-- **Ground family** and **explicit-voltage rails** join automatically. The name
-  states the node, so a match is a real match.
+- **Ground family** and **explicit-voltage rails** join automatically, across copies
+  as readily as across designs. The name states the node, so a match is a real match.
 - **Anonymous names** (`N$1`) never join. EAGLE generates them per file and they
   carry no meaning.
 - **Role-named rails** (`VCC`, `VIN`, `AGND`) and **ordinary shared signals**
-  (`SDA`, `D+`) are asked about. Joining a `VCC` that means 5 V on one board and
-  3.3 V on another is a real hazard, so the tool refuses to guess.
-- A name only one design uses is not a conflict and passes through untouched.
+  (`SDA`, `D+`) from two or more source designs are asked about. Joining a `VCC`
+  that means 5 V on one board and 3.3 V on another is a real hazard.
+- **Replica nets**, appearing in several copies of one design, get their own
+  question type. They are asked once per design with all candidates listed, rather
+  than once per net per copy.
+- A name only one instance uses is not a conflict and passes through untouched.
 
 ### The intra-design guard
 
 Normalisation groups names across designs, but two nets inside one design are always
 distinct, even when they normalize alike. `plan_design_names()` lets at most one raw
-name per design inherit a joined name; the rest are localised under the design
-prefix. Without this, a board carrying both `3.3V` and `+3V3` would have those two
-separate nodes shorted together.
+name per instance inherit a joined name; the rest are localised under the prefix.
+Without this, a board carrying both `3.3V` and `+3V3` would have those two separate
+nodes shorted together.
+
+## Linking differently named nets
+
+`linking.py` proposes connections that no naming rule could find. Net names are
+tokenised, folded through a synonym table so `MOSI`, `SDI` and `DATA` all become
+`SDA`, and compared as token sets.
+
+The scorer is tuned for precision over recall. A missed connection remains visible
+as an unrouted net; a wrong one has to be noticed and undone, which is more
+expensive. So:
+
+- Connector pin labels (`A0`, `D13`) are rejected outright. The digit is the
+  identity, not a channel marker, and two of them say nothing about being one wire.
+- A trailing index is stripped only from tokens of three characters or more, so
+  `SDA1` folds to `SDA` while `A1` stays `A1`.
+- Containment is tested on token sets, not raw strings. Substring matching on short
+  names produced nonsense like `A1` inside `ADDR0`.
+- Camel-case splitting only runs on names that actually contain lowercase, or `I2C`
+  would tear into `I2` and `C`.
+
+A suggestion is only offered when accepting it would bridge designs that this net
+leaves otherwise unconnected.
+
+Accepted links become key aliases in the resolver, which regroups on the next
+`finalize()`. Links apply before any join or split decision, because they change
+which nets are in which group.
 
 ## Geometry
 
@@ -81,8 +129,32 @@ Translation is applied only to board-level geometry: `plain`, `elements` and
 `signals`. Library packages use local coordinates relative to their own origin and
 must never be shifted, or every footprint in the file would deform.
 
-Schematic sheets are not translated at all. Each design gets its own sheet, so the
+### Packing and search
+
+`_shelf()` packs boards into rows sized to their tallest member, targeting a roughly
+square result. Uniform cells, still available as `--layout grid`, pay for the largest
+board on every slot.
+
+`optimize()` hill-climbs over board orderings. Each candidate ordering is re-packed
+and scored, so the search changes both which board sits where and the shelf geometry
+that follows from it. Cost is a weighted sum of airwire length and bounding area,
+each normalised against the starting arrangement so two quantities in different
+units can be added meaningfully.
+
+Airwire length is a minimum spanning tree, per net, over the board-local centroids of
+its pads, translated by each board's placement. Element origins substitute for exact
+pad positions: enough to rank arrangements, and it avoids resolving package pad
+geometry through rotation.
+
+### Schematic sheets
+
+Per-design sheets need no translation at all, which is why that is the default: the
 pages keep their original coordinates and look exactly as drawn.
+
+Packed sheets translate each design's content to a tile, after measuring its extent
+with page borders excluded. Designs sharing a sheet have their frame parts dropped,
+since several overlapping A4 borders are just noise. Dropped parts are skipped in
+both the parts list and the instance list.
 
 ## Why joined nets stay unrouted
 
@@ -96,9 +168,14 @@ worse than showing the work that remains.
 
 `tests/conftest.py` builds small synthetic EAGLE designs that clash deliberately:
 same part names, same library names with different pad geometry, and a net set
-covering all three buckets. Those tests run in milliseconds and pin the behaviour.
+covering every bucket. Those tests run in milliseconds and pin the behaviour.
 
-`tests/test_samples.py` runs the same pipeline over the eight real Adafruit designs
-in `examples/adafruit`, checking that every library reference resolves, every
-reference designator is unique, no two boards overlap, and each source board
-survives as a rigid translation. It skips if the samples are absent.
+`tests/test_layout.py` checks that no arrangement style ever overlaps two boards,
+that packing beats uniform cells on mixed sizes, and that the optimizer shortens
+airwires without producing overlaps. `tests/test_linking.py` pins the scorer against
+both the pairs it must find and the ones it must not.
+
+`tests/test_samples.py` runs the pipeline over the eight real Adafruit designs in
+`examples/adafruit`, checking that every library reference resolves, every reference
+designator is unique, no two boards overlap, and each source board survives as a
+rigid translation. It skips if the samples are absent.

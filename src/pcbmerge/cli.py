@@ -6,13 +6,13 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import prompt
+from . import layout, linking, prompt
 from .eagle import EagleDoc, EagleError
 from .libraries import LibraryMerger
 from .merge import build_resolver, load_designs, merge
 from .nets import Action, Kind, NetResolver
 from .plan import (
-    DesignSpec, MergePlan, apply_plan, default_prefix, design_name,
+    DesignSpec, MergePlan, apply_plan, default_prefix, design_name, expand,
     plan_from_resolver,
 )
 
@@ -22,38 +22,54 @@ OFF = "\033[0m"
 
 
 def _color(enabled: bool):
-    if enabled:
-        return BOLD, DIM, OFF
-    return "", "", ""
+    return (BOLD, DIM, OFF) if enabled else ("", "", "")
 
 
 # --------------------------------------------------------------------------
 # input discovery
 # --------------------------------------------------------------------------
 
-def collect_specs(inputs: list[str], prefixes: list[str] | None = None) -> list[DesignSpec]:
+def collect_specs(inputs: list[str], prefixes: list[str] | None = None,
+                  counts: list[str] | None = None) -> list[DesignSpec]:
     """Turn command line paths into design specs, pairing .sch with .brd.
 
-    Accepts a schematic, a board, a shared stem, or a directory.
+    Accepts a schematic, a board, a shared stem, or a directory.  A count may
+    be attached to any input as `path*4` or supplied positionally with
+    --count.
     """
     stems: list[Path] = []
+    wanted: dict[Path, int] = {}
+
     for raw in inputs:
+        text, _, multiplier = raw.rpartition("*")
+        if text and multiplier.isdigit():
+            raw, count = text, max(1, int(multiplier))
+        else:
+            count = 1
+
         path = Path(raw)
         if path.is_dir():
             found = sorted({p.with_suffix("") for p in path.glob("*.sch")})
             if not found:
                 raise EagleError(f"{path}: no .sch files in this directory")
-            stems.extend(found)
+            for stem in found:
+                if stem not in stems:
+                    stems.append(stem)
+                wanted[stem] = count
             continue
+
         stem = path.with_suffix("") if path.suffix in (".sch", ".brd") else path
         if not stem.with_suffix(".sch").exists():
             raise EagleError(f"{stem.with_suffix('.sch')}: not found")
         if stem not in stems:
             stems.append(stem)
+        wanted[stem] = count
 
     overrides = list(prefixes or [])
+    count_args = list(counts or [])
     specs: list[DesignSpec] = []
     taken: set[str] = set()
+
     for index, stem in enumerate(stems):
         name = design_name(stem)
         if index < len(overrides):
@@ -63,16 +79,28 @@ def collect_specs(inputs: list[str], prefixes: list[str] | None = None) -> list[
         else:
             prefix = default_prefix(name, taken)
         taken.add(prefix)
+
+        count = wanted.get(stem, 1)
+        if index < len(count_args):
+            try:
+                count = max(1, int(count_args[index]))
+            except ValueError as exc:
+                raise EagleError(f"--count {count_args[index]!r} is not a number") from exc
+
         brd = stem.with_suffix(".brd")
-        specs.append(
-            DesignSpec(
-                name=name,
-                prefix=prefix,
-                sch=str(stem.with_suffix(".sch")),
-                brd=str(brd) if brd.exists() else None,
-            )
-        )
+        specs.append(DesignSpec(
+            name=name, prefix=prefix, sch=str(stem.with_suffix(".sch")),
+            brd=str(brd) if brd.exists() else None, count=count,
+        ))
     return specs
+
+
+def _resolve(specs: list[DesignSpec], default: Action, replica: Action):
+    """Load, group and classify. Shared by every command."""
+    designs = load_designs(expand(specs))
+    resolver = build_resolver(designs)
+    resolver.finalize(default_action=default, replica_action=replica)
+    return designs, resolver
 
 
 # --------------------------------------------------------------------------
@@ -81,15 +109,16 @@ def collect_specs(inputs: list[str], prefixes: list[str] | None = None) -> list[
 
 def cmd_inspect(args: argparse.Namespace) -> int:
     b, d, o = _color(not args.no_color)
-    specs = collect_specs(args.inputs)
-    designs = load_designs(specs)
+    specs = collect_specs(args.inputs, args.prefix, args.count)
+    designs, resolver = _resolve(specs, Action.SPLIT, Action.SPLIT)
 
     print(f"{b}Designs{o}")
-    for design in designs:
-        board = "sch+brd" if design.brd else "sch only"
-        parts = len(design.sch.parts())
-        nets = len(design.sch.net_names())
-        print(f"  {design.name:<44} {board:8}  {parts:>4} parts  {nets:>4} nets  prefix {design.prefix}")
+    for spec in specs:
+        board = "sch+brd" if spec.brd else "sch only"
+        copies = f"x{spec.count}" if spec.count > 1 else "  "
+        print(f"  {spec.name:<44} {board:8} {copies}  prefix {spec.prefix}")
+    if len(designs) != len(specs):
+        print(f"  {d}{len(specs)} designs expand to {len(designs)} board instances{o}")
 
     libs = LibraryMerger()
     for design in designs:
@@ -103,15 +132,22 @@ def cmd_inspect(args: argparse.Namespace) -> int:
     for key, value in libs.stats().items():
         print(f"  {key:<14} {value}")
 
-    resolver = build_resolver(designs)
-    resolver.finalize()
     _print_nets(resolver, b, d, o, verbose=args.verbose)
+
+    suggestions = linking.suggest(resolver)
+    print(f"\n{b}Possible connections between differently named nets{o}")
+    if not suggestions:
+        print(f"  {d}none found{o}")
+    for suggestion in suggestions:
+        print(f"  {suggestion.left_name:<18} <-> {suggestion.right_name:<18} "
+              f"{suggestion.score:.0%}  {d}{suggestion.reason}{o}")
     return 0
 
 
 def _print_nets(resolver: NetResolver, b: str, d: str, o: str, verbose: bool = False) -> None:
     joined = resolver.joined()
     questions = resolver.open_questions()
+    replicas = resolver.replica_questions()
     anonymous = [g for g in resolver.all_groups() if g.kind is Kind.ANONYMOUS]
     unique = [g for g in resolver.all_groups() if g.kind is Kind.UNIQUE]
 
@@ -120,45 +156,84 @@ def _print_nets(resolver: NetResolver, b: str, d: str, o: str, verbose: bool = F
         print(f"  {d}none{o}")
     for group in joined:
         spellings = " / ".join(group.spellings)
-        print(f"  {group.merged_name or group.display:<16} {group.design_count} designs   {d}{spellings}{o}")
+        print(f"  {group.merged_name or group.display:<16} {group.design_count} designs   "
+              f"{d}{spellings}{o}")
 
     print(f"\n{b}Needs a decision{o}")
     if not questions:
         print(f"  {d}none{o}")
     for group in questions:
         spellings = " / ".join(group.spellings)
-        print(f"  {spellings:<24} {group.design_count} designs   {d}{group.kind.value}{o}")
+        print(f"  {spellings:<24} {group.source_count} designs   {d}{group.kind.value}{o}")
         if verbose:
-            print(f"    {d}{', '.join(group.designs)}{o}")
+            print(f"    {d}{', '.join(group.sources)}{o}")
+
+    if replicas:
+        print(f"\n{b}One per copy unless you say otherwise{o}")
+        for group in replicas:
+            print(f"  {group.display:<24} {group.design_count} copies   "
+                  f"{d}{group.sources[0] if group.sources else ''}{o}")
 
     print(f"\n{b}Kept separate{o}")
-    print(f"  {len(anonymous)} auto-generated name(s), {len(unique)} name(s) used by one design only")
+    print(f"  {len(anonymous)} auto-generated name(s), "
+          f"{len(unique)} name(s) used by one design only")
 
 
 def cmd_plan(args: argparse.Namespace) -> int:
-    specs = collect_specs(args.inputs, args.prefix)
-    designs = load_designs(specs)
-    resolver = build_resolver(designs)
-    resolver.finalize(default_action=Action(args.default))
+    specs = collect_specs(args.inputs, args.prefix, args.count)
+    if args.interactive and prompt.is_interactive():
+        prompt.ask_counts(specs)
+
+    designs, resolver = _resolve(specs, Action(args.default), Action(args.replicas))
+    _apply_cli_links(resolver, args.link, Action(args.default), Action(args.replicas))
 
     if args.interactive and prompt.is_interactive():
+        prompt.ask_links(resolver, linking.suggest(resolver))
+        resolver.finalize(default_action=Action(args.default),
+                          replica_action=Action(args.replicas))
+        prompt.ask_replicas(resolver)
         prompt.ask_all(resolver, default=Action(args.default))
 
     plan = plan_from_resolver(
         resolver, specs, output=args.output, title=args.title or args.output,
-        layout=args.layout, gap=args.gap, columns=args.columns,
+        layout=args.layout, optimize=args.optimize, gap=args.gap, columns=args.columns,
+        sheet_layout=args.sheet_layout, sheets_per_page=args.sheets_per_page,
     )
     path = plan.save(args.plan_out)
-    open_count = len([g for g in resolver.open_questions() if g.decided_by == "auto"])
+    pending = len([g for g in resolver.open_questions() if g.decided_by == "auto"])
     print(f"Wrote {path}")
-    print(f"  {len(plan.designs)} designs, {len(plan.nets)} net decisions")
-    if open_count:
-        print(f"  {open_count} still on the default; edit the plan or run merge to be asked")
+    print(f"  {len(plan.designs)} designs, {len(plan.instances)} instances, "
+          f"{len(plan.nets)} net decisions, {len(plan.links)} link(s)")
+    if pending:
+        print(f"  {pending} still on the default; edit the plan or run merge to be asked")
     return 0
+
+
+def _apply_cli_links(resolver: NetResolver, links: list[str] | None,
+                     default: Action, replica: Action) -> None:
+    """Apply --link arguments, refusing to act on nets that do not exist.
+
+    Linking a real net to a typo would quietly join the real one across every
+    design, which is exactly the kind of silent change this tool must not make.
+    """
+    if not links:
+        return
+    for text in links:
+        try:
+            keys, name = linking.parse_link(text)
+        except ValueError as exc:
+            raise EagleError(str(exc)) from exc
+        unknown = [k for k in keys if k not in resolver.groups]
+        if unknown:
+            raise EagleError(
+                f"--link {text!r}: no design has a net called {', '.join(unknown)}")
+        resolver.link(keys, name)
+    resolver.finalize(default_action=default, replica_action=replica)
 
 
 def cmd_merge(args: argparse.Namespace) -> int:
     b, d, o = _color(not args.no_color)
+    interactive = prompt.is_interactive() and not args.yes
 
     if args.plan:
         plan = MergePlan.load(args.plan)
@@ -166,73 +241,118 @@ def cmd_merge(args: argparse.Namespace) -> int:
         if args.output:
             plan.output = args.output
     else:
-        specs = collect_specs(args.inputs, args.prefix)
+        specs = collect_specs(args.inputs, args.prefix, args.count)
+        if interactive and args.ask_counts:
+            prompt.ask_counts(specs)
         plan = MergePlan(
             output=args.output or "merged", title=args.title or args.output or "merged",
-            designs=specs, layout=args.layout, gap=args.gap, columns=args.columns,
+            designs=specs, layout=args.layout, optimize=args.optimize, gap=args.gap,
+            columns=args.columns, sheet_layout=args.sheet_layout,
+            sheets_per_page=args.sheets_per_page,
         )
 
     if not specs:
         print("nothing to merge: give me some .sch files", file=sys.stderr)
         return 2
 
-    designs = load_designs(specs)
-    resolver = build_resolver(designs)
-    resolver.finalize(default_action=Action(args.default))
+    default, replica = Action(args.default), Action(args.replicas)
+    designs, resolver = _resolve(specs, default, replica)
+    _apply_cli_links(resolver, args.link, default, replica)
 
     if args.plan:
-        missing = apply_plan(resolver, plan)
-        for key in missing:
+        for key in apply_plan(resolver, plan, default, replica):
             print(f"  {d}plan mentions net {key}, which no design uses{o}")
 
-    pending = [g for g in resolver.open_questions() if g.decided_by == "auto"]
-    if pending and not args.yes:
-        if prompt.is_interactive():
-            prompt.ask_all(resolver, default=Action(args.default))
-        else:
-            print(f"{len(pending)} net(s) need a decision and this is not a terminal.")
-            print(f"Re-run with --yes to take the default ({args.default}), or supply --plan.")
-            for group in pending:
-                print(f"  {' / '.join(group.spellings)}  ({group.design_count} designs)")
-            return 3
+    if interactive:
+        if not args.no_suggest:
+            found = linking.suggest(resolver)
+            if found and prompt.ask_links(resolver, found):
+                resolver.finalize(default_action=default, replica_action=replica)
+                if args.plan:
+                    apply_plan(resolver, plan, default, replica)
+        prompt.ask_replicas(resolver)
+        prompt.ask_all(resolver, default=default)
 
-    out_dir = Path(args.out_dir)
-    stem = Path(plan.output).name
-    report = merge(designs, resolver, plan, out_dir, stem)
+    pending = [g for g in resolver.open_questions() if g.decided_by == "auto"]
+    if pending and not args.yes and not interactive:
+        print(f"{len(pending)} net(s) need a decision and this is not a terminal.")
+        print(f"Re-run with --yes to take the default ({args.default}), or supply --plan.")
+        for group in pending:
+            print(f"  {' / '.join(group.spellings)}  ({group.source_count} designs)")
+        return 3
+
+    report = merge(designs, resolver, plan, Path(args.out_dir), Path(plan.output).name)
 
     if args.save_plan:
-        snapshot = plan_from_resolver(
+        plan_from_resolver(
             resolver, specs, output=plan.output, title=plan.title,
-            layout=plan.layout, gap=plan.gap, columns=plan.columns,
-        )
-        snapshot.save(args.save_plan)
+            layout=plan.layout, optimize=plan.optimize, gap=plan.gap,
+            columns=plan.columns, sheet_layout=plan.sheet_layout,
+            sheets_per_page=plan.sheets_per_page,
+        ).save(args.save_plan)
         print(f"Decisions saved to {args.save_plan}")
 
     _print_report(report, b, d, o)
     return 0
 
 
+def _delta(saved: float, label: str, unit: str) -> str:
+    """Say which way a saving went, rather than leaving a signed number."""
+    if abs(saved) < 0.5:
+        return f"{label} unchanged"
+    direction = "shorter" if unit == "mm" else "smaller"
+    if saved < 0:
+        direction = "longer" if unit == "mm" else "larger"
+    return f"{label} {abs(saved):.0f} {unit} {direction}"
+
+
 def _print_report(report, b: str, d: str, o: str) -> None:
-    print(f"\n{b}Merged {len(report.designs)} designs{o}")
+    replicated = {k: v for k, v in report.copies.items() if v > 1}
+    print(f"\n{b}Merged {len(report.copies)} designs into {len(report.designs)} instances{o}")
+    for name, count in replicated.items():
+        print(f"  {name} x{count}")
     print(f"  {report.parts} parts, {report.elements} board elements, "
           f"{report.sheets} sheets, {report.signals} signals")
     if report.renamed_parts:
         print(f"  {report.renamed_parts} reference designators prefixed")
     if report.renamed_library_items:
         print(f"  {report.renamed_library_items} clashing library items renamed")
+    if report.dropped_frames:
+        print(f"  {report.dropped_frames} page border(s) dropped for packed sheets")
     if report.dropped_urns:
         print(f"  {report.dropped_urns} managed-library links converted to local copies")
 
+    if report.linked_nets:
+        print(f"\n{b}Connected by hand{o}")
+        for name, spellings in report.linked_nets:
+            print(f"  {name:<16} {' + '.join(spellings)}")
+
     if report.joined_nets:
         print(f"\n{b}Joined nets{o}")
-        for name, designs in report.joined_nets:
-            print(f"  {name:<16} {len(designs)} designs")
+        for name, designs in report.joined_nets[:20]:
+            print(f"  {name:<16} {len(designs)} instances")
+        if len(report.joined_nets) > 20:
+            print(f"  {d}... and {len(report.joined_nets) - 20} more{o}")
+
+    before, after = report.before, report.after
+    if before and after:
+        print(f"\n{b}Board layout{o}")
+        print(f"  {'':<12} {'size (mm)':>18} {'fill':>7} {'airwire (mm)':>14}")
+        print(f"  {'start':<12} {before.width:8.1f} x {before.height:6.1f} "
+              f"{before.utilization:6.0f}% {before.airwire:14.0f}")
+        print(f"  {'chosen':<12} {after.width:8.1f} x {after.height:6.1f} "
+              f"{after.utilization:6.0f}% {after.airwire:14.0f}")
+        if after.iterations:
+            air = before.airwire - after.airwire
+            area = before.area - after.area
+            print(f"  {d}{after.improved} improvement(s) over {after.iterations} tries; "
+                  f"{_delta(air, 'airwire', 'mm')}, {_delta(area, 'board', 'mm2')}{o}")
 
     if report.placements:
         print(f"\n{b}Board placement{o}")
         for place in report.placements:
             print(f"  {place.design:<44} {place.width:7.2f} x {place.height:7.2f} mm  "
-                  f"at row {place.row}, col {place.column}")
+                  f"at {place.x:8.2f}, {place.y:8.2f}")
 
     if report.warnings:
         print(f"\n{b}Warnings{o}")
@@ -356,20 +476,38 @@ def build_parser() -> argparse.ArgumentParser:
 
     def add_inputs(sub):
         sub.add_argument("inputs", nargs="+",
-                         help=".sch files, shared stems, or a directory of designs")
+                         help=".sch files, shared stems, or a directory. "
+                              "Append *N to place several copies, e.g. relay.sch*4")
+        sub.add_argument("--count", action="append",
+                         help="copies of each input, in order")
+        sub.add_argument("--prefix", action="append",
+                         help="reference-designator prefix per input, in order")
 
     def add_layout(sub):
-        sub.add_argument("--layout", choices=("grid", "row", "column"), default="grid",
-                         help="how source boards are tiled (default: grid)")
+        sub.add_argument("--layout", choices=layout.STYLES, default="pack",
+                         help="how source boards are tiled (default: pack)")
+        sub.add_argument("--optimize", choices=tuple(layout.WEIGHTS), default="balanced",
+                         help="what the placement search minimises (default: balanced)")
         sub.add_argument("--gap", type=float, default=5.0,
                          help="millimetres between tiled boards (default: 5)")
         sub.add_argument("--columns", type=int, default=0,
                          help="force a column count for the grid layout")
+        sub.add_argument("--sheet-layout", choices=("per-design", "packed"),
+                         default="per-design",
+                         help="one sheet per design, or several designs per sheet")
+        sub.add_argument("--sheets-per-page", type=int, default=1,
+                         help="designs per sheet when --sheet-layout packed")
 
     def add_policy(sub):
         sub.add_argument("--default", choices=("join", "split"), default="split",
                          help="what to do with contested nets when not asking "
                               "(default: split, which keeps designs electrically apart)")
+        sub.add_argument("--replicas", choices=("join", "split"), default="split",
+                         help="whether nets shared between copies of one design are "
+                              "common (default: split, one net per copy)")
+        sub.add_argument("--link", action="append",
+                         help="tie differently named nets together, e.g. SDA=I2C_DATA "
+                              "or SDA=I2C_DATA:BUS_SDA to name the result")
 
     inspect = subparsers.add_parser("inspect", help="report parts, libraries and net conflicts")
     add_inputs(inspect)
@@ -383,26 +521,30 @@ def build_parser() -> argparse.ArgumentParser:
     planner.add_argument("-o", "--plan-out", default="merge-plan.json")
     planner.add_argument("--output", default="merged", help="stem for the merged files")
     planner.add_argument("--title", default="")
-    planner.add_argument("--prefix", action="append",
-                         help="reference-designator prefix per input, in order")
     planner.add_argument("-i", "--interactive", action="store_true",
-                         help="ask about contested nets while building the plan")
+                         help="ask about copies, links and contested nets")
     planner.set_defaults(func=cmd_plan)
 
     merger = subparsers.add_parser("merge", help="write the merged .sch and .brd")
     merger.add_argument("inputs", nargs="*",
-                        help=".sch files, shared stems, or a directory (omit when using --plan)")
+                        help=".sch files, stems, or a directory (omit when using --plan). "
+                             "Append *N for several copies")
+    merger.add_argument("--count", action="append", help="copies of each input, in order")
+    merger.add_argument("--prefix", action="append",
+                        help="reference-designator prefix per input, in order")
     add_layout(merger)
     add_policy(merger)
     merger.add_argument("-o", "--output", default="", help="stem for the merged files")
     merger.add_argument("--out-dir", default="out", help="where to write (default: out)")
     merger.add_argument("--title", default="")
-    merger.add_argument("--prefix", action="append",
-                        help="reference-designator prefix per input, in order")
     merger.add_argument("--plan", help="read decisions from a plan file")
     merger.add_argument("--save-plan", help="write the decisions actually used")
+    merger.add_argument("--ask-counts", action="store_true",
+                        help="ask how many copies of each design to place")
+    merger.add_argument("--no-suggest", action="store_true",
+                        help="skip the differently-named-net suggestions")
     merger.add_argument("-y", "--yes", action="store_true",
-                        help="never ask; take the --default for contested nets")
+                        help="never ask; take the defaults for everything contested")
     merger.set_defaults(func=cmd_merge)
 
     checker = subparsers.add_parser("check", help="verify a .sch/.brd pair is consistent")

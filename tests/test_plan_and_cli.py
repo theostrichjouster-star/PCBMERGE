@@ -11,7 +11,7 @@ from pcbmerge.cli import collect_specs, main
 from pcbmerge.eagle import EagleDoc, sanitize_name, unique_name
 from pcbmerge.merge import build_resolver, load_designs
 from pcbmerge.nets import Action
-from pcbmerge.plan import MergePlan, apply_plan, default_prefix, plan_from_resolver
+from pcbmerge.plan import MergePlan, apply_plan, default_prefix, expand, plan_from_resolver
 
 
 def test_inputs_pair_schematics_with_their_boards(designs):
@@ -61,8 +61,7 @@ def test_unique_name_walks_the_dollar_sequence():
 
 def test_plan_round_trips_through_json(designs, tmp_path):
     specs = collect_specs([str(designs)])
-    loaded = load_designs(specs)
-    resolver = build_resolver(loaded)
+    resolver = build_resolver(load_designs(expand(specs)))
     resolver.finalize()
     plan = plan_from_resolver(resolver, specs, output="merged", title="merged")
 
@@ -74,7 +73,7 @@ def test_plan_round_trips_through_json(designs, tmp_path):
 
 def test_a_plan_records_why_each_decision_was_made(designs, tmp_path):
     specs = collect_specs([str(designs)])
-    resolver = build_resolver(load_designs(specs))
+    resolver = build_resolver(load_designs(expand(specs)))
     resolver.finalize()
     plan = plan_from_resolver(resolver, specs, output="merged", title="merged")
 
@@ -89,7 +88,7 @@ def test_a_plan_records_why_each_decision_was_made(designs, tmp_path):
 
 def test_editing_a_plan_changes_the_merge(designs, tmp_path):
     specs = collect_specs([str(designs)])
-    resolver = build_resolver(load_designs(specs))
+    resolver = build_resolver(load_designs(expand(specs)))
     resolver.finalize()
     plan = plan_from_resolver(resolver, specs, output="merged", title="merged")
 
@@ -97,7 +96,7 @@ def test_editing_a_plan_changes_the_merge(designs, tmp_path):
     decision.action = "join"
     decision.name = "I2C_SDA"
 
-    fresh = build_resolver(load_designs(specs))
+    fresh = build_resolver(load_designs(expand(specs)))
     fresh.finalize()
     missing = apply_plan(fresh, plan)
     assert missing == []
@@ -109,7 +108,7 @@ def test_editing_a_plan_changes_the_merge(designs, tmp_path):
 
 def test_a_plan_naming_an_unknown_net_is_reported_not_fatal(designs):
     specs = collect_specs([str(designs)])
-    resolver = build_resolver(load_designs(specs))
+    resolver = build_resolver(load_designs(expand(specs)))
     resolver.finalize()
     plan = MergePlan(designs=specs)
     from pcbmerge.plan import NetDecision
@@ -188,3 +187,91 @@ def test_prefix_can_be_chosen_by_hand(designs, tmp_path):
     names = {p.get("name") for p in sch.parts()}
     assert "LEFT_R1" in names
     assert "RIGHT_R1" in names
+
+
+# -- links and layout in the plan ------------------------------------------
+
+def test_a_link_survives_a_plan_round_trip(designs, tmp_path):
+    specs = collect_specs([str(designs)])
+    resolver = build_resolver(load_designs(expand(specs)))
+    resolver.finalize()
+    resolver.link(["SDA", "VCC"], "TIED")
+    resolver.finalize()
+
+    plan = plan_from_resolver(resolver, specs, output="merged", title="merged")
+    assert len(plan.links) == 1
+    again = MergePlan.from_json(plan.to_json())
+
+    fresh = build_resolver(load_designs(expand(specs)))
+    fresh.finalize()
+    apply_plan(fresh, again)
+    assert fresh.group_for("SDA") is fresh.group_for("VCC")
+    assert fresh.group_for("SDA").merged_name == "TIED"
+
+
+def test_copy_counts_survive_a_plan_round_trip(designs, tmp_path):
+    specs = collect_specs([str(designs)])
+    specs[0].count = 3
+    plan = MergePlan(designs=specs)
+    again = MergePlan.from_json(plan.to_json())
+    assert again.designs[0].count == 3
+    assert len(again.instances) == 4
+
+
+def test_layout_settings_survive_a_plan_round_trip():
+    plan = MergePlan(layout="pack", optimize="airwire", gap=2.5,
+                     sheet_layout="packed", sheets_per_page=4)
+    again = MergePlan.from_json(plan.to_json())
+    assert (again.layout, again.optimize, again.gap) == ("pack", "airwire", 2.5)
+    assert (again.sheet_layout, again.sheets_per_page) == ("packed", 4)
+
+
+def test_cli_rejects_a_link_to_a_net_that_does_not_exist(designs, tmp_path, capsys):
+    code = main(["--no-color", "merge", str(designs), "--out-dir", str(tmp_path / "out"),
+                 "-o", "combo", "--yes", "--link", "SDA=NOSUCHNET"])
+    assert code == 2
+    assert "no design has a net called" in capsys.readouterr().err
+
+
+def test_cli_link_joins_differently_named_nets(designs, tmp_path):
+    code = main(["--no-color", "merge", str(designs), "--out-dir", str(tmp_path / "out"),
+                 "-o", "combo", "--yes", "--link", "SDA=VCC:TIED"])
+    assert code == 0
+    sch = EagleDoc.load(tmp_path / "out" / "combo.sch")
+    names = {n.get("name") for n in sch.nets()}
+    assert "TIED" in names
+
+
+def test_cli_packs_several_designs_onto_one_sheet(designs, tmp_path):
+    code = main(["--no-color", "merge", str(designs), "--out-dir", str(tmp_path / "out"),
+                 "-o", "combo", "--yes", "--sheet-layout", "packed",
+                 "--sheets-per-page", "2"])
+    assert code == 0
+    sch = EagleDoc.load(tmp_path / "out" / "combo.sch")
+    assert len(sch.sheets()) == 1, "both designs share one sheet"
+
+
+def test_a_packed_sheet_keeps_its_designs_apart(designs, tmp_path):
+    main(["--no-color", "merge", str(designs), "--out-dir", str(tmp_path / "out"),
+          "-o", "combo", "--yes", "--sheet-layout", "packed", "--sheets-per-page", "2"])
+    sch = EagleDoc.load(tmp_path / "out" / "combo.sch")
+    boxes: dict[str, list[float]] = {}
+    for instance in sch.section.iterfind("sheets/sheet/instances/instance"):
+        prefix = instance.get("part").split("_")[0]
+        x, y = float(instance.get("x")), float(instance.get("y"))
+        box = boxes.setdefault(prefix, [x, y, x, y])
+        box[0], box[1] = min(box[0], x), min(box[1], y)
+        box[2], box[3] = max(box[2], x), max(box[3], y)
+
+    keys = list(boxes)
+    assert len(keys) == 2
+    a, b = boxes[keys[0]], boxes[keys[1]]
+    assert not (a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3])
+
+
+def test_the_optimizer_reports_what_it_changed(designs, tmp_path, capsys):
+    main(["--no-color", "merge", str(designs), "--out-dir", str(tmp_path / "out"),
+          "-o", "combo", "--yes", "--layout", "pack", "--optimize", "balanced"])
+    out = capsys.readouterr().out
+    assert "Board layout" in out
+    assert "airwire" in out
