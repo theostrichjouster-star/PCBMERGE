@@ -6,7 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import layout, linking, prompt
+from . import layout, linking, prompt, pruning
 from .eagle import EagleDoc, EagleError
 from .libraries import LibraryMerger
 from .merge import build_resolver, load_designs, merge
@@ -186,8 +186,15 @@ def cmd_plan(args: argparse.Namespace) -> int:
 
     designs, resolver = _resolve(specs, Action(args.default), Action(args.replicas))
     _apply_cli_links(resolver, args.link, Action(args.default), Action(args.replicas))
+    _apply_cli_connections(resolver, designs, args.connect,
+                           Action(args.default), Action(args.replicas))
+    drops = list(args.drop or [])
 
     if args.interactive and prompt.is_interactive():
+        drops.extend(prompt.ask_drops(pruning.catalog(designs)))
+        prompt.ask_connections(resolver, designs)
+        resolver.finalize(default_action=Action(args.default),
+                          replica_action=Action(args.replicas))
         prompt.ask_links(resolver, linking.suggest(resolver))
         resolver.finalize(default_action=Action(args.default),
                           replica_action=Action(args.replicas))
@@ -196,7 +203,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
 
     plan = plan_from_resolver(
         resolver, specs, output=args.output, title=args.title or args.output,
-        layout=args.layout, optimize=args.optimize, gap=args.gap, columns=args.columns,
+        drops=drops, layout=args.layout, optimize=args.optimize, gap=args.gap, columns=args.columns,
         sheet_layout=args.sheet_layout, sheets_per_page=args.sheets_per_page,
     )
     path = plan.save(args.plan_out)
@@ -231,6 +238,58 @@ def _apply_cli_links(resolver: NetResolver, links: list[str] | None,
     resolver.finalize(default_action=default, replica_action=replica)
 
 
+def _apply_cli_connections(resolver: NetResolver, designs, connections,
+                           default: Action, replica: Action) -> None:
+    """Apply --connect arguments, refusing anything that names no such net."""
+    if not connections:
+        return
+    names = [d.name for d in designs]
+    available = resolver.nets_by_design()
+    for text in connections:
+        members = prompt.parse_connection(text, names)
+        if members is None:
+            raise EagleError(f"--connect {text!r}: write it as design:net=design:net")
+        unknown = [f"{d}:{n}" for d, n in members if n not in available.get(d, [])]
+        if unknown:
+            raise EagleError(f"--connect {text!r}: no such net {', '.join(unknown)}")
+        if len({d for d, _ in members}) < 2:
+            raise EagleError(
+                f"--connect {text!r}: both nets are on one design, which this "
+                f"cannot join")
+        resolver.connect(members, members[0][1])
+    resolver.finalize(default_action=default, replica_action=replica)
+
+
+def cmd_parts(args: argparse.Namespace) -> int:
+    """List what is in the designs, grouped so it can be dropped by kind."""
+    b, d, o = _color(not args.no_color)
+    specs = collect_specs(args.inputs, args.prefix, args.count)
+    designs, _ = _resolve(specs, Action.SPLIT, Action.SPLIT)
+    groups = pruning.catalog(designs)
+
+    total = sum(g.count for g in groups)
+    mechanical = [g for g in groups if g.mechanical]
+    print(f"{b}{total} parts in {len(designs)} design instances{o}")
+    print(f"  {sum(g.count for g in mechanical)} of them are decoration: "
+          f"borders, holes, fiducials, silkscreen labels")
+    print()
+
+    header = f"{'kind':<30}{'value':<12}{'copies':>7}{'designs':>9}   note"
+    print(f"{b} {header}{o}")
+    shown = groups if args.all else groups[:30]
+    for group in shown:
+        mark = "*" if group.mechanical else " "
+        print(f"{mark}{group.kind:<30}{group.value:<12}{group.count:>7}"
+              f"{len(group.designs):>9}   {d}{group.note}{o}")
+    if len(shown) < len(groups):
+        print(f"  {d}... and {len(groups) - len(shown)} more; pass --all{o}")
+    example = groups[0].kind if groups else "FIDUCIAL"
+    print()
+    print(f"{d}* nothing is wired to these. "
+          f"Leave a kind out with --drop {example}{o}")
+    return 0
+
+
 def cmd_merge(args: argparse.Namespace) -> int:
     b, d, o = _color(not args.no_color)
     interactive = prompt.is_interactive() and not args.yes
@@ -246,7 +305,8 @@ def cmd_merge(args: argparse.Namespace) -> int:
             prompt.ask_counts(specs)
         plan = MergePlan(
             output=args.output or "merged", title=args.title or args.output or "merged",
-            designs=specs, layout=args.layout, optimize=args.optimize, gap=args.gap,
+            designs=specs, drops=list(args.drop or []),
+            layout=args.layout, optimize=args.optimize, gap=args.gap,
             columns=args.columns, sheet_layout=args.sheet_layout,
             sheets_per_page=args.sheets_per_page,
         )
@@ -258,12 +318,24 @@ def cmd_merge(args: argparse.Namespace) -> int:
     default, replica = Action(args.default), Action(args.replicas)
     designs, resolver = _resolve(specs, default, replica)
     _apply_cli_links(resolver, args.link, default, replica)
+    _apply_cli_connections(resolver, designs, args.connect, default, replica)
+
+    unmatched = pruning.unmatched(designs, [pruning.parse_drop(x) for x in plan.drops])
+    if unmatched:
+        raise EagleError(
+            f"--drop {unmatched[0]}: nothing in these designs matches")
 
     if args.plan:
         for key in apply_plan(resolver, plan, default, replica):
             print(f"  {d}plan mentions net {key}, which no design uses{o}")
 
     if interactive:
+        if not args.no_prune:
+            plan.drops.extend(prompt.ask_drops(pruning.catalog(designs)))
+        prompt.ask_connections(resolver, designs)
+        resolver.finalize(default_action=default, replica_action=replica)
+        if args.plan:
+            apply_plan(resolver, plan, default, replica)
         if not args.no_suggest:
             found = linking.suggest(resolver)
             if found and prompt.ask_links(resolver, found):
@@ -286,7 +358,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
     if args.save_plan:
         plan_from_resolver(
             resolver, specs, output=plan.output, title=plan.title,
-            layout=plan.layout, optimize=plan.optimize, gap=plan.gap,
+            drops=plan.drops, layout=plan.layout, optimize=plan.optimize, gap=plan.gap,
             columns=plan.columns, sheet_layout=plan.sheet_layout,
             sheets_per_page=plan.sheets_per_page,
         ).save(args.save_plan)
@@ -317,6 +389,8 @@ def _print_report(report, b: str, d: str, o: str) -> None:
         print(f"  {report.renamed_parts} reference designators prefixed")
     if report.renamed_library_items:
         print(f"  {report.renamed_library_items} clashing library items renamed")
+    if report.dropped_parts:
+        print(f"  {report.dropped_parts} part(s) left out")
     if report.dropped_frames:
         print(f"  {report.dropped_frames} page border(s) dropped for shared sheets")
     if report.sheet_extent:
@@ -512,6 +586,12 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_argument("--link", action="append",
                          help="tie differently named nets together, e.g. SDA=I2C_DATA "
                               "or SDA=I2C_DATA:BUS_SDA to name the result")
+        sub.add_argument("--connect", action="append",
+                         help="wire named designs' nets together, e.g. "
+                              "esp32:GPIO5=relay:SIGNAL")
+        sub.add_argument("--drop", action="append",
+                         help="leave parts out, e.g. --drop MOUNTINGHOLE or "
+                              "--drop esp32:FID*")
 
     inspect = subparsers.add_parser("inspect", help="report parts, libraries and net conflicts")
     add_inputs(inspect)
@@ -547,9 +627,18 @@ def build_parser() -> argparse.ArgumentParser:
                         help="ask how many copies of each design to place")
     merger.add_argument("--no-suggest", action="store_true",
                         help="skip the differently-named-net suggestions")
+    merger.add_argument("--no-prune", action="store_true",
+                        help="skip the question about parts to leave out")
     merger.add_argument("-y", "--yes", action="store_true",
                         help="never ask; take the defaults for everything contested")
     merger.set_defaults(func=cmd_merge)
+
+    parts = subparsers.add_parser(
+        "parts", help="list parts, grouped so they can be dropped by kind")
+    add_inputs(parts)
+    parts.add_argument("--all", action="store_true",
+                       help="show every kind, not just the top 30")
+    parts.set_defaults(func=cmd_parts)
 
     checker = subparsers.add_parser("check", help="verify a .sch/.brd pair is consistent")
     checker.add_argument("design", help="a .sch, .brd, or shared stem")

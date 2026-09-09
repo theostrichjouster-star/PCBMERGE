@@ -16,7 +16,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import layout
+from . import layout, pruning
 from .eagle import (
     EagleDoc, EagleError, bbox, clone, content_hash, fmt, strip_urns, tidy,
     translate, unique_name,
@@ -51,6 +51,7 @@ class Design:
     net_map: dict[str, str] = field(default_factory=dict)
     class_map: dict[str, str] = field(default_factory=dict)
     dropped_parts: set[str] = field(default_factory=set)
+    dropped_nets: set[str] = field(default_factory=set)
 
     @property
     def name(self) -> str:
@@ -79,6 +80,7 @@ class MergeReport:
     renamed_library_items: int = 0
     dropped_urns: int = 0
     dropped_frames: int = 0
+    dropped_parts: int = 0
     sheet_extent: tuple[float, float, float, float] | None = None
     placements: list[layout.Placement] = field(default_factory=list)
     before: layout.LayoutStats | None = None
@@ -138,10 +140,58 @@ class Merger:
     def prepare(self) -> None:
         for design in self.designs:
             self.report.copies[design.source] = self.report.copies.get(design.source, 0) + 1
+        self._apply_drops()
         self._merge_libraries()
         self._map_parts()
         self._map_classes()
         self._map_nets()
+
+    def _apply_drops(self) -> None:
+        """Decide what is left out, before anything is given a new name.
+
+        Dropping happens first so removed parts never claim a designator, and
+        so the same decision reaches the schematic and the board together.
+        """
+        rules = [pruning.parse_drop(text) for text in self.plan.drops]
+        for design, names in pruning.resolve(self.designs, rules).items():
+            by_name = {d.name: d for d in self.designs}
+            if design in by_name:
+                by_name[design].dropped_parts |= names
+
+        if self._designs_per_sheet() > 1 and len(self.designs) > 1:
+            for design in self.designs:
+                frames = self._frame_parts(design)
+                design.dropped_parts |= frames
+                self.report.dropped_frames += len(frames)
+
+        for design in self.designs:
+            design.dropped_nets = self._nets_left_empty(design)
+
+        for design, name, pins in pruning.connections_lost(self.designs, self._drops()):
+            self.report.warnings.append(
+                f"dropped {design}:{name}, which had {pins} connection(s)")
+        self.report.dropped_parts = sum(len(d.dropped_parts) for d in self.designs)
+
+    def _drops(self) -> dict[str, set[str]]:
+        return {d.name: d.dropped_parts for d in self.designs if d.dropped_parts}
+
+    def _nets_left_empty(self, design: Design) -> set[str]:
+        """Nets whose every pin belonged to a part being dropped.
+
+        Decided once, from the schematic, and then applied to the board as
+        well.  Letting each file work it out separately is how you end up with
+        a board signal that no schematic net matches, which EAGLE rejects.
+        A net that never had pins is left alone: it came that way.
+        """
+        if not design.dropped_parts:
+            return set()
+        pins: dict[str, list[str]] = {}
+        for net in design.sch.nets():
+            name = net.get("name", "")
+            for pinref in net.iterfind(".//pinref"):
+                pins.setdefault(name, []).append(pinref.get("part", ""))
+        return {name for name, parts in pins.items()
+                if parts and all(p in design.dropped_parts for p in parts)}
 
     def _merge_libraries(self) -> None:
         for design in self.designs:
@@ -163,7 +213,7 @@ class Merger:
                     if name not in names:
                         names.append(name)
             for original in names:
-                if not original:
+                if not original or original in design.dropped_parts:
                     continue
                 base = f"{design.prefix}{original}" if design.prefix else original
                 final = unique_name(base, taken)
@@ -251,9 +301,6 @@ class Merger:
         sheets_node = ET.SubElement(schematic, "sheets")
         sheets_node.text = "\n"
 
-        if packed:
-            self._mark_frames_dropped(tiles)
-
         for design in self.designs:
             renames = self.libs.renames_by_design[design.name]
             for part in design.sch.parts():
@@ -326,6 +373,8 @@ class Merger:
                 copy = clone(net)
                 original = net.get("name", "")
                 copy.set("name", design.net_map.get(original, original))
+                if original in design.dropped_nets:
+                    continue
                 copy.set("class", design.class_map.get(net.get("class", "0"), "0"))
                 self._rewrite_net_body(copy, design)
                 nets.append(copy)
@@ -337,13 +386,19 @@ class Merger:
         return out
 
     def _rewrite_net_body(self, net: ET.Element, design: Design) -> None:
-        """Point every pin reference inside a net at its renamed part.
+        """Point pin references at renamed parts, dropping any that are gone.
 
         Net labels need no edit: EAGLE draws them from the net's own name.
         """
-        for pinref in net.iterfind(".//pinref"):
-            part = pinref.get("part", "")
-            pinref.set("part", design.part_map.get(part, part))
+        for segment in net:
+            if not isinstance(segment.tag, str):
+                continue
+            for pinref in list(segment.iterfind("pinref")):
+                part = pinref.get("part", "")
+                if part in design.dropped_parts:
+                    segment.remove(pinref)
+                    continue
+                pinref.set("part", design.part_map.get(part, part))
 
     # -- schematic packing --------------------------------------------------
     def _sheet_tiles(self, per_sheet: int) -> dict[str, tuple[int, float, float]]:
@@ -379,19 +434,6 @@ class Merger:
             if FRAME_HINT in (part.get("deviceset", "") or "").upper():
                 out.add(part.get("name", ""))
         return out
-
-    def _mark_frames_dropped(self, tiles: dict[str, tuple[int, float, float]]) -> None:
-        """Discard page borders for designs that now share a sheet."""
-        crowded = {index for index, _, _ in tiles.values()}
-        counts = {i: 0 for i in crowded}
-        for _, (index, _, _) in tiles.items():
-            counts[index] += 1
-        for design in self.designs:
-            sheet_index = tiles.get(design.name, (0, 0.0, 0.0))[0]
-            if counts.get(sheet_index, 1) > 1:
-                frames = self._frame_parts(design)
-                design.dropped_parts |= frames
-                self.report.dropped_frames += len(frames)
 
     def _packed_sheets(self, tiles: dict[str, tuple[int, float, float]]) -> list[ET.Element]:
         """Build sheets that hold more than one design each."""
@@ -513,8 +555,10 @@ class Merger:
             place = by_design[design.name]
             renames = self.libs.renames_by_design[design.name]
             for element in design.brd.elements():
-                node = clone(element)
                 original = element.get("name", "")
+                if original in design.dropped_parts:
+                    continue
+                node = clone(element)
                 node.set("name", design.part_map.get(original, original))
                 apply_to_element(node, renames)
                 translate(node, place.dx, place.dy)
@@ -523,15 +567,15 @@ class Merger:
 
             for signal in design.brd.signals():
                 original = signal.get("name", "")
+                if original in design.dropped_nets:
+                    continue
                 final = design.net_map.get(original, original)
                 copy = clone(signal)
                 copy.set("name", final)
                 cls = signal.get("class")
                 if cls is not None:
                     copy.set("class", design.class_map.get(cls, "0"))
-                for contact in copy.iterfind(".//contactref"):
-                    element_name = contact.get("element", "")
-                    contact.set("element", design.part_map.get(element_name, element_name))
+                _rewrite_signal_body(copy, design)
                 translate(copy, place.dx, place.dy)
 
                 if final in merged_signals:
@@ -654,6 +698,22 @@ class Merger:
         for cls in self._classes:
             node.append(clone(cls))
         return node
+
+
+def _rewrite_signal_body(signal: ET.Element, design: Design) -> None:
+    """Point contacts at renamed elements, dropping any that are gone.
+
+    Copper belonging to a signal that survives is kept even when one of its
+    parts went away, because it is real routing the engineer can see and
+    delete.  Whether the signal itself survives was already settled on the
+    schematic side, so the two files cannot disagree.
+    """
+    for contact in list(signal.iterfind("contactref")):
+        element = contact.get("element", "")
+        if element in design.dropped_parts:
+            signal.remove(contact)
+            continue
+        contact.set("element", design.part_map.get(element, element))
 
 
 def _absorb_named(target: ET.Element, source: ET.Element,

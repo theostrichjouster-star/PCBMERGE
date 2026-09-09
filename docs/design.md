@@ -13,6 +13,7 @@ you route.
 | `libraries.py` | Merge library sets, renaming items that clash by name but differ in content. |
 | `nets.py` | Classify net names and decide join or split. |
 | `linking.py` | Propose connections between differently named nets. |
+| `pruning.py` | Catalogue parts and work out which a set of rules removes. |
 | `layout.py` | Measure boards, pack them, and search for a cheaper arrangement. |
 | `plan.py` | Serialise every decision to JSON so a merge is replayable. |
 | `prompt.py` | Ask about copies, replicas, contested nets and links. |
@@ -118,6 +119,40 @@ leaves otherwise unconnected.
 Accepted links become key aliases in the resolver, which regroups on the next
 `finalize()`. Links apply before any join or split decision, because they change
 which nets are in which group.
+
+## Two kinds of connection
+
+`link` and `connect` both force nets into one group, at different granularities.
+
+`link` aliases one resolution *key* to another, so `SDA` and `I2C_DATA` become one
+net wherever either name appears. That is what you want for a bus.
+
+`connect` aliases one *(design, net name)* pair, so a controller's `A0` can reach
+the first of three relay copies while the other two keep their own `SIGNAL`. Both
+end up in `linked_keys`, which makes the group a join.
+
+`key_for()` resolves a net's group in one place, checking the per-reference alias
+first and the key alias second, so `finalize()` stays a single pass. `group_for()`
+takes an optional design for the same reason: once a connection has moved one
+copy of a name, the name alone no longer identifies a group.
+
+## Dropping parts
+
+`pruning.py` catalogues every part and board-only footprint, grouping by kind and
+folding copy numbers away, so `PLABEL0` through `PLABEL32` are one decision rather
+than thirty-three. Value is part of the key only for parts that do something: a
+5.1K resistor differs from a 10K one, but a fiducial's value says nothing.
+
+Drops are applied first, in `prepare()`, before any renaming. That ordering is
+what stops a removed part from reserving a designator, and it is what lets one
+decision reach both files.
+
+Net survival is the subtle part. A net whose every pin belonged to removed parts
+has to disappear from the schematic *and* the board, and the two must agree.
+Letting each side decide for itself produces board signals that no schematic net
+matches, which EAGLE rejects; an early version of this did exactly that and a test
+caught it. So `_nets_left_empty()` decides once, from the schematic, and both
+builders consult the same set.
 
 ## Geometry
 

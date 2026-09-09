@@ -175,6 +175,9 @@ class NetResolver:
         self.groups: dict[str, NetGroup] = {}
         # Forced regrouping, from explicit links and accepted suggestions.
         self.key_alias: dict[str, str] = {}
+        # A connection naming one design's copy of a net, rather than the name
+        # everywhere: (design, raw name) -> the group it is pulled into.
+        self.ref_alias: dict[tuple[str, str], str] = {}
         self.link_names: dict[str, str] = {}
         self.linked_keys: set[str] = set()
 
@@ -212,13 +215,38 @@ class NetResolver:
             self.link_names[target] = name
         return target
 
+    def connect(self, members: list[tuple[str, str]], name: str = "") -> str:
+        """Wire specific designs' nets together, leaving other copies alone.
+
+        `link` works on a name everywhere it appears.  This works on one
+        design's copy of a net, which is what you need to run a controller's
+        GPIO to the first relay board and not to the other three.
+        """
+        members = [(d, r) for d, r in members if d and r]
+        if len(members) < 2:
+            return ""
+        target = normalize(name) if name else normalize(members[0][1])
+        target = self.key_alias.get(target, target)
+        for design, raw in members:
+            self.ref_alias[(design, raw)] = target
+        self.linked_keys.add(target)
+        self.link_names[target] = name or members[0][1]
+        return target
+
+    def key_for(self, ref: NetRef) -> str:
+        """Which group a net belongs to, honouring links and connections."""
+        target = self.ref_alias.get((ref.design, ref.raw))
+        if target is None:
+            target = normalize(ref.raw)
+        return self.key_alias.get(target, target)
+
     # -- resolution ---------------------------------------------------------
     def finalize(self, default_action: Action = Action.SPLIT,
                  replica_action: Action = Action.SPLIT) -> None:
         """Rebuild every group from the refs and set automatic decisions."""
         self.groups = {}
         for ref in self.refs:
-            key = self.key_alias.get(normalize(ref.raw), normalize(ref.raw))
+            key = self.key_for(ref)
             group = self.groups.get(key)
             if group is None:
                 group = NetGroup(key=key, display=ref.raw)
@@ -271,9 +299,33 @@ class NetResolver:
     def all_groups(self) -> list[NetGroup]:
         return sorted(self.groups.values(), key=lambda g: (-g.design_count, g.key))
 
-    def group_for(self, raw_name: str) -> NetGroup | None:
+    def group_for(self, raw_name: str, design: str = "") -> NetGroup | None:
+        """The group a net name lands in, for one design or in general.
+
+        Pass the design when connections may have pulled one copy of a name
+        somewhere its siblings did not follow.
+        """
+        if design:
+            return self.groups.get(self.key_for(NetRef(design, design, raw_name)))
         key = normalize(raw_name)
-        return self.groups.get(self.key_alias.get(key, key))
+        found = self.groups.get(self.key_alias.get(key, key))
+        if found is not None:
+            return found
+        # A connection may have moved this name into a group of its own, under
+        # a key the name alone does not reach.
+        for (_, raw), target in self.ref_alias.items():
+            if raw == raw_name:
+                return self.groups.get(target)
+        return None
+
+    def nets_by_design(self) -> dict[str, list[str]]:
+        """Every design's net names, in the order the files list them."""
+        out: dict[str, list[str]] = {}
+        for ref in self.refs:
+            names = out.setdefault(ref.design, [])
+            if ref.raw not in names:
+                names.append(ref.raw)
+        return out
 
 
 def _preferred_spelling(group: NetGroup) -> str:

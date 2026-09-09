@@ -16,7 +16,7 @@ from pathlib import Path
 from .eagle import sanitize_name
 from .nets import Action, Kind, NetResolver
 
-PLAN_VERSION = 2
+PLAN_VERSION = 3
 
 
 @dataclass
@@ -83,12 +83,28 @@ class LinkDecision:
 
 
 @dataclass
+class ConnectDecision:
+    """A wire between named designs' copies of a net.
+
+    Unlike a link, which acts on a name wherever it appears, this names the
+    exact instances, so a controller can reach one relay board and not its
+    three siblings.
+    """
+
+    members: list[list[str]]      # [design, net] pairs
+    name: str = ""
+    note: str = ""
+
+
+@dataclass
 class MergePlan:
     output: str = "merged"
     title: str = "merged"
     designs: list[DesignSpec] = field(default_factory=list)
     nets: list[NetDecision] = field(default_factory=list)
     links: list[LinkDecision] = field(default_factory=list)
+    connections: list[ConnectDecision] = field(default_factory=list)
+    drops: list[str] = field(default_factory=list)
     layout: str = "pack"
     optimize: str = "balanced"
     gap: float = 5.0
@@ -110,6 +126,8 @@ class MergePlan:
             designs=[DesignSpec(**d) for d in data.get("designs", [])],
             nets=[NetDecision(**n) for n in data.get("nets", [])],
             links=[LinkDecision(**l) for l in data.get("links", [])],
+            connections=[ConnectDecision(**c) for c in data.get("connections", [])],
+            drops=list(data.get("drops", [])),
             layout=data.get("layout", "pack"),
             optimize=data.get("optimize", "balanced"),
             gap=float(data.get("gap", 5.0)),
@@ -206,6 +224,7 @@ def plan_from_resolver(
     designs: list[DesignSpec],
     output: str,
     title: str,
+    drops: list[str] | None = None,
     layout: str = "pack",
     optimize: str = "balanced",
     gap: float = 5.0,
@@ -230,16 +249,27 @@ def plan_from_resolver(
         ))
 
     links: list[LinkDecision] = []
+    connections: list[ConnectDecision] = []
     for target in sorted(resolver.linked_keys):
         members = sorted({k for k, v in resolver.key_alias.items() if v == target} | {target})
-        links.append(LinkDecision(
-            keys=members,
-            name=resolver.link_names.get(target, target),
-            note="tied together by hand; no naming rule would match these",
-        ))
+        refs = sorted([design, raw] for (design, raw), key
+                      in resolver.ref_alias.items() if key == target)
+        if refs:
+            connections.append(ConnectDecision(
+                members=refs,
+                name=resolver.link_names.get(target, target),
+                note="specific designs wired together by hand",
+            ))
+        if len(members) > 1:
+            links.append(LinkDecision(
+                keys=members,
+                name=resolver.link_names.get(target, target),
+                note="tied together by hand; no naming rule would match these",
+            ))
 
     return MergePlan(
         output=output, title=title, designs=designs, nets=nets, links=links,
+        connections=connections, drops=list(drops or []),
         layout=layout, optimize=optimize, gap=gap, columns=columns,
         sheet_layout=sheet_layout, sheets_per_page=sheets_per_page,
     )
@@ -269,10 +299,13 @@ def apply_plan(resolver: NetResolver, plan: MergePlan,
     """
     missing: list[str] = []
 
-    if plan.links:
+    if plan.links or plan.connections:
         from .linking import apply_links
 
         missing.extend(apply_links(resolver, [(l.keys, l.name) for l in plan.links]))
+        for connection in plan.connections:
+            resolver.connect([(m[0], m[1]) for m in connection.members if len(m) == 2],
+                             connection.name)
         resolver.finalize(default_action=default_action, replica_action=replica_action)
 
     for decision in plan.nets:

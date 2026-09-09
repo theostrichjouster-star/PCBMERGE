@@ -1,10 +1,11 @@
 """Asking the engineer the things the tool will not guess at.
 
-There are four kinds of question, and each exists because guessing would be
-worse than asking:
+Every question here exists because guessing would be worse than asking:
 
 - how many copies of a design to place;
-- which nets are common across those copies;
+- which parts are worth carrying over at all;
+- which of one design's nets should reach another's;
+- which nets are common across copies of one design;
 - whether two same-named nets from different designs are one node;
 - whether two differently-named nets are secretly the same wire.
 """
@@ -222,3 +223,128 @@ def ask_links(resolver: NetResolver, suggestions: list[Suggestion]) -> int:
             print("  answer y, n or rename")
         print()
     return made
+
+
+# --------------------------------------------------------------------------
+# parts to leave out
+# --------------------------------------------------------------------------
+
+def _picked(raw: str, count: int) -> set[int]:
+    """Read a numbers-or-all answer into a set of one-based indices."""
+    answer = raw.strip().lower()
+    if answer in ("a", "all"):
+        return set(range(1, count + 1))
+    chosen: set[int] = set()
+    for piece in answer.replace(",", " ").split():
+        if "-" in piece[1:]:
+            start, _, end = piece.partition("-")
+            if start.isdigit() and end.isdigit():
+                chosen.update(range(int(start), int(end) + 1))
+        elif piece.isdigit():
+            chosen.add(int(piece))
+    return {n for n in chosen if 1 <= n <= count}
+
+
+def ask_drops(groups, limit: int = 25) -> list[str]:
+    """Offer to leave parts out. Returns drop patterns the user chose.
+
+    Grouped by kind, because deciding about twenty mounting holes one at a
+    time is not a decision, it is data entry.
+    """
+    offered = [g for g in groups if g.count > 1 or g.mechanical][:limit]
+    if not offered:
+        return []
+
+    mechanical = [g for g in offered if g.mechanical]
+    print("\nParts you may not want on the merged board.")
+    print("Mounting holes and fiducials sit at each sub-board's old position,")
+    print("and page borders overlap into noise.\n")
+    for index, group in enumerate(offered, 1):
+        mark = "*" if group.mechanical else " "
+        print(f"  {index:>2}{mark} {group.label:<30} {group.count:>3} copies "
+              f"in {len(group.designs)} designs   {group.note}")
+    print("\n  * nothing is wired to these")
+
+    total = sum(g.count for g in mechanical)
+    hint = f", 'm' for the {len(mechanical)} starred ({total} parts)" if mechanical else ""
+    raw = _ask(f"\n  numbers to drop{hint}, Enter to keep everything: ")
+
+    if raw.strip().lower() in ("m", "mech", "mechanical"):
+        chosen = {i for i, g in enumerate(offered, 1) if g.mechanical}
+    else:
+        chosen = _picked(raw, len(offered))
+
+    patterns = [offered[i - 1].kind for i in sorted(chosen)]
+    if patterns:
+        print(f"  dropping {len(patterns)} kind(s): {', '.join(patterns)}")
+    print()
+    return patterns
+
+
+# --------------------------------------------------------------------------
+# wiring specific designs together
+# --------------------------------------------------------------------------
+
+def ask_connections(resolver, designs) -> int:
+    """Let the user wire one design's net to another's, by hand.
+
+    This is the case no rule and no scorer reaches: you know the controller's
+    GPIO5 drives the first relay board, and nothing in either file says so.
+    """
+    names = [d.name for d in designs]
+    if len(names) < 2:
+        return 0
+
+    print("\nConnect nets between designs?  Enter to skip.")
+    print("Write them as  design:net = design:net,  for example")
+    print(f"  1:GPIO5 = 2:SIGNAL\n")
+    for index, name in enumerate(names, 1):
+        print(f"  {index:>2}  {name}")
+
+    made = 0
+    while True:
+        raw = _ask("\n  connection (Enter when done): ")
+        if not raw:
+            break
+        members = parse_connection(raw, names)
+        if members is None:
+            print("  write it as  design:net = design:net")
+            continue
+        if len({design for design, _ in members}) < 2:
+            print("  those are both on the same design; nothing to connect")
+            continue
+        unknown = [f"{d}:{n}" for d, n in members
+                   if n not in resolver.nets_by_design().get(d, [])]
+        if unknown:
+            print(f"  no such net: {', '.join(unknown)}")
+            continue
+        name = _ask("  name for the merged net [%s]: " % members[0][1], members[0][1])
+        resolver.connect(members, name)
+        print(f"  connected {' = '.join(f'{d}:{n}' for d, n in members)} as {name}")
+        made += 1
+    return made
+
+
+def parse_connection(text: str, designs: list[str]) -> list[tuple[str, str]] | None:
+    """Read `1:GPIO5 = 2:SIGNAL`, accepting an index or a name for the design."""
+    parts = [p.strip() for p in text.split("=") if p.strip()]
+    if len(parts) < 2:
+        return None
+    members: list[tuple[str, str]] = []
+    for part in parts:
+        design, sep, net = part.rpartition(":")
+        if not sep or not net.strip():
+            return None
+        design, net = design.strip(), net.strip()
+        if design.isdigit():
+            index = int(design)
+            if not 1 <= index <= len(designs):
+                return None
+            design = designs[index - 1]
+        elif design not in designs:
+            matches = [d for d in designs if design.lower() in d.lower()]
+            if len(matches) != 1:
+                return None
+            design = matches[0]
+        members.append((design, net))
+    return members

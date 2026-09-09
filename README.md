@@ -121,6 +121,91 @@ pcbmerge merge examples/adafruit --link SDA=I2C_DATA:BUS_SDA --link SCL=I2C_CLK
 A link naming a net no design has is an error rather than a silent no-op, because
 linking a real net to a typo would quietly join the real one everywhere.
 
+## Leaving parts out
+
+Eight breakout boards bring eight page borders, twenty-two mounting holes,
+sixteen fiducials and ninety-four silkscreen pin labels. On one merged board
+almost none of that is wanted: the holes sit at each sub-board's old position and
+the fiducials belong to panels that no longer exist.
+
+See what is there, grouped by kind:
+
+```bash
+pcbmerge parts examples/adafruit
+```
+
+```
+461 parts in 8 design instances
+  161 of them are decoration: borders, holes, fiducials, silkscreen labels
+
+ kind                          value        copies  designs   note
+*PLABEL                                         94        4   no connections
+*MOUNTINGHOLE                                   22        8   no connections
+*FIDUCIAL                                       16        8   no connections
+*FRAME_A4                                        4        4   no connections
+```
+
+Then leave kinds out with `--drop`, which matches the designator, the deviceset
+or the package, case-insensitively:
+
+```bash
+pcbmerge merge examples/adafruit --drop MOUNTINGHOLE --drop FIDUCIAL --drop PLABEL
+```
+
+Restrict a rule to one design with `esp32:FID*`. A rule matching nothing is an
+error, not a silent no-op, so a typo cannot quietly keep parts you meant to remove.
+
+Dropping is decided before anything is renamed, so a removed part never claims a
+designator a survivor could have had. It reaches the schematic and the board
+together, pins are pulled out of the nets they were on, and a net whose every pin
+belonged to removed parts goes too, on both sides at once. Removing something that
+was actually wired to a net is reported, since that changes the netlist:
+
+```
+Warnings
+  dropped Adafruit_MAX31850:R1, which had 4 connection(s)
+```
+
+Copper belonging to a signal that survives is kept even when one of its parts
+went away. It is real routing, and deleting it silently would be worse than
+leaving a stub you can see.
+
+## Connecting specific designs
+
+`--link` acts on a name wherever it appears. That is right for a bus, and wrong
+when a controller drives one board out of four copies. `--connect` names the
+instances:
+
+```bash
+pcbmerge merge controller.sch relay.sch*3 \
+  --connect 1:A0=2:SIGNAL --connect 1:A1=3:SIGNAL
+```
+
+Designs can be named by their listing number or by any unambiguous part of their
+name. The result is exactly what you asked for and nothing more:
+
+| net | reaches |
+| --- | --- |
+| `A0` | controller, relay copy 1 |
+| `A1` | controller, relay copy 2 |
+| `SIGNAL` | relay copy 3, on its own |
+
+Connecting two nets that live on the same design is refused, and so is naming a
+net no design has.
+
+Interactively, `merge` asks for these after the copy counts:
+
+```
+Connect nets between designs?  Enter to skip.
+Write them as  design:net = design:net,  for example
+  1:GPIO5 = 2:SIGNAL
+
+   1  Adafruit_ESP32-S3_8MB_No_PSRAM
+   2  Adafruit_Non-Latching_Relay_Breakout #1
+
+  connection (Enter when done):
+```
+
 ## Board placement
 
 Source boards are packed rather than dropped into uniform cells, then the
@@ -227,7 +312,9 @@ Useful flags:
 - `--default join|split` what "everything contested" means, default `split`
 - `--replicas join|split` whether nets are common across copies, default `split`
 - `--ask-counts` ask how many copies of each design to place
-- `--link A=B:NAME` tie differently named nets together
+- `--link A=B:NAME` tie differently named nets together everywhere
+- `--connect 1:A0=2:SIGNAL` wire named designs' nets together
+- `--drop MOUNTINGHOLE` leave parts out; `--no-prune` skips the question
 - `--no-suggest` skip the differently-named-net questions
 - `--layout pack|grid|row|column` and `--optimize balanced|airwire|area|none`
 - `--sheet-layout per-design|packed|single` and `--sheets-per-page 4`
@@ -268,10 +355,21 @@ A plan also carries copy counts, hand-made links, and the layout settings:
 {
   "designs": [{"name": "relay", "prefix": "RELAY_", "sch": "relay.sch", "count": 4}],
   "links": [{"keys": ["SDA", "I2C_DATA"], "name": "BUS_SDA"}],
+  "connections": [{"members": [["esp32", "A0"], ["relay #1", "SIGNAL"]], "name": "A0"}],
+  "drops": ["MOUNTINGHOLE", "FIDUCIAL"],
   "layout": "pack",
   "optimize": "balanced",
   "sheet_layout": "per-design"
 }
+```
+
+### parts
+
+List every part, grouped by kind so a decision covers all its copies at once.
+Kinds nothing is wired to are starred.
+
+```bash
+pcbmerge parts examples/adafruit --all
 ```
 
 ### check
