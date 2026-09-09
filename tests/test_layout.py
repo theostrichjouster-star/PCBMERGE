@@ -115,10 +115,8 @@ def test_stats_describe_how_full_the_board_is():
     assert stats.utilization == pytest.approx(50.0)
 
 
-def test_sheet_tiles_group_designs_onto_pages():
+def test_sheet_tiles_give_every_design_its_own_slot():
     sizes = [(f"d{i}", 100.0, 80.0) for i in range(5)]
-    tiles = layout.sheet_tiles(sizes, per_sheet=4)
-    pages = {sheet for sheet, _, _ in tiles.values()}
-    assert pages == {0, 1}
-    first = [t for t in tiles.values() if t[0] == 0]
-    assert len({(x, y) for _, x, y in first}) == 4, "four distinct slots"
+    tiles = layout.sheet_tiles(sizes)
+    assert len(tiles) == 5
+    assert len(set(tiles.values())) == 5, "no two designs share a position"

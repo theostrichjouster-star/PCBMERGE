@@ -304,41 +304,25 @@ the sub-boards need 55 x 333 mm and overflow the 150 x 100 mm outline;
 give --outline a bigger size or move them by hand
 ```
 
-## Schematic layout
+## The schematic
 
-Three options, set with `--sheet-layout`:
+Every design lands on one sheet. Each drawing is packed into rows sized to their
+tallest member, so a page of one large and three small drawings does not pay for
+the large one four times, and each block is captioned with its design name on
+layer 97 (Info) so a crowded page stays navigable.
 
-| Value | Result |
-| --- | --- |
-| `per-design` | one sheet per design instance (default) |
-| `packed` | several designs per sheet, count set by `--sheets-per-page` |
-| `single` | every design on one sheet |
+Page borders are dropped, since eight overlapping A4 frames are only noise. A
+single design merged on its own keeps both its border and its original
+coordinates.
 
-The default leaves each design's coordinates untouched, so every page looks exactly
-as it was drawn. Because EAGLE treats one net name as one net across all sheets,
-joining a rail needs no wires drawn between pages.
-
-To put everything on one sheet:
-
-```bash
-pcbmerge merge examples/adafruit -o combo --out-dir out --sheet-layout single
-```
-
-The eight sample designs become a single 705 by 576 mm sheet. Each design is packed
-into rows sized to their tallest member rather than into uniform cells, so a page of
-one large and three small drawings does not pay for the large one four times.
-
-Two things change when designs share a sheet. Page borders are dropped, since eight
-overlapping A4 frames are only noise. And each block gets a caption naming its design,
-drawn on layer 97 (Info) so it never affects connectivity.
-
-Nets that were joined also fold into a single element per name. EAGLE writes one
-`<net>` per name per sheet carrying several segments, and two same-named nets on one
-sheet is not a form it accepts. On the samples, `GND` becomes one net with 88
+Nets of the same name fold into one element carrying several segments. EAGLE
+writes one `<net>` per name per sheet, and two elements named `GND` on one sheet
+is not a form it accepts. On the eight samples, `GND` becomes one net with 88
 segments reaching all eight designs.
 
-One sheet stops being practical at some size. Past about a metre and a half the merge
-says so and suggests `--sheet-layout packed` with a page count instead.
+Multi-sheet output was built and withdrawn. It emitted an empty `<moduleinsts/>`
+container that no hand-drawn file carries, and EAGLE 9.6.2 would not reliably open
+the result. One sheet is what works, so one sheet is what there is.
 
 ## Commands
 
@@ -385,7 +369,6 @@ Useful flags:
 - `--no-suggest` skip the differently-named-net questions
 - `--layout pack|grid|row|column` and `--optimize balanced|airwire|area|none`
 - `--outline 150x100`, or `keep` / `none`
-- `--sheet-layout per-design|packed|single` and `--sheets-per-page 4`
 - `--gap 5` and `--columns 3`
 - `--prefix LEFT --prefix RIGHT` choose reference-designator prefixes yourself
 - `--save-plan used.json` record the answers you gave
@@ -427,8 +410,7 @@ A plan also carries copy counts, hand-made links, and the layout settings:
   "drops": ["MOUNTINGHOLE", "FIDUCIAL"],
   "layout": "pack",
   "optimize": "balanced",
-  "outline": "150x100",
-  "sheet_layout": "per-design"
+  "outline": "150x100"
 }
 ```
 
@@ -461,8 +443,8 @@ pcbmerge check out/combo
 
 ## What the merged files look like
 
-**Schematic.** Each design instance becomes its own sheet, named after the design it
-came from, unless you pack several per page or ask for a single sheet.
+**Schematic.** One sheet holding every design, each captioned, with same-named
+nets folded into a single element.
 
 **Board.** Source boards are tiled into a packed arrangement inside a single
 outline, each moved as a rigid body so relative placement, rotation and routing

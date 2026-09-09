@@ -300,18 +300,9 @@
                 <option value="none">nothing</option>
               </select></label>
           </div>
-          <div class="pair">
-            <label class="field"><span>Schematic sheets</span>
-              <select id="o-sheet">
-                <option value="per-design">one per design</option>
-                <option value="single">all on one</option>
-                <option value="packed">several per sheet</option>
-              </select></label>
-            <label class="field"><span>Per sheet</span>
-              <input id="o-persheet" type="number" value="4" min="1"></label>
-          </div>
           <p class="note">Outline takes <span class="mono">150x100</span>,
-             <span class="mono">keep</span> or <span class="mono">none</span>.</p>
+             <span class="mono">keep</span> or <span class="mono">none</span>.
+             Every design goes on one schematic sheet.</p>
         </div>
       </section>
 
@@ -440,8 +431,6 @@ function payload() {
       gap: parseFloat($("o-gap").value) || 0,
       layout: $("o-layout").value,
       optimize: $("o-optimize").value,
-      sheetLayout: $("o-sheet").value,
-      sheetsPerPage: parseInt($("o-persheet").value, 10) || 1,
       default: "split",
       replicas: "split",
     },
@@ -938,7 +927,7 @@ $("browse").onclick = browse;
 $("browse-big").onclick = browse;
 $("path").onkeydown = (e) => { if (e.key === "Enter") scan(); };
 $("merge").onclick = runMerge;
-["o-outline", "o-gap", "o-layout", "o-optimize", "o-sheet", "o-persheet"]
+["o-outline", "o-gap", "o-layout", "o-optimize"]
   .forEach((id) => { $(id).oninput = schedule; $(id).onchange = schedule; });
 window.addEventListener("resize", () => { if (state.data) drawBoard(); });
 

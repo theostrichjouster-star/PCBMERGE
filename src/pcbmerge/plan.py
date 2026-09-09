@@ -4,6 +4,9 @@ Answering the same net questions on every run would be miserable, so the tool
 separates deciding from doing.  A plan is JSON: which designs go in, how many
 copies of each, what prefix they get, which nets join, and which differently
 named nets were tied together by hand.  Edit it, commit it, feed it back.
+
+Plans written before version 4 may name a sheet layout.  That option is gone and
+is ignored on load; everything goes on one sheet now.
 """
 
 from __future__ import annotations
@@ -17,7 +20,7 @@ from .eagle import sanitize_name
 from .layout import DEFAULT_OUTLINE
 from .nets import Action, Kind, NetResolver
 
-PLAN_VERSION = 3
+PLAN_VERSION = 4
 
 
 @dataclass
@@ -111,8 +114,6 @@ class MergePlan:
     outline: str = DEFAULT_OUTLINE
     gap: float = 5.0
     columns: int = 0
-    sheet_layout: str = "per-design"
-    sheets_per_page: int = 1
     version: int = PLAN_VERSION
 
     # -- serialisation ------------------------------------------------------
@@ -135,8 +136,6 @@ class MergePlan:
             outline=data.get("outline", DEFAULT_OUTLINE),
             gap=float(data.get("gap", 5.0)),
             columns=int(data.get("columns", 0)),
-            sheet_layout=data.get("sheet_layout", "per-design"),
-            sheets_per_page=int(data.get("sheets_per_page", 1)),
             version=int(data.get("version", PLAN_VERSION)),
         )
 
@@ -233,8 +232,6 @@ def plan_from_resolver(
     outline: str = DEFAULT_OUTLINE,
     gap: float = 5.0,
     columns: int = 0,
-    sheet_layout: str = "per-design",
-    sheets_per_page: int = 1,
 ) -> MergePlan:
     """Snapshot the resolver's current decisions as a plan."""
     nets: list[NetDecision] = []
@@ -275,7 +272,6 @@ def plan_from_resolver(
         output=output, title=title, designs=designs, nets=nets, links=links,
         connections=connections, drops=list(drops or []),
         layout=layout, optimize=optimize, outline=outline, gap=gap, columns=columns,
-        sheet_layout=sheet_layout, sheets_per_page=sheets_per_page,
     )
 
 

@@ -204,7 +204,6 @@ def cmd_plan(args: argparse.Namespace) -> int:
     plan = plan_from_resolver(
         resolver, specs, output=args.output, title=args.title or args.output,
         drops=drops, outline=args.outline, layout=args.layout, optimize=args.optimize, gap=args.gap, columns=args.columns,
-        sheet_layout=args.sheet_layout, sheets_per_page=args.sheets_per_page,
     )
     path = plan.save(args.plan_out)
     pending = len([g for g in resolver.open_questions() if g.decided_by == "auto"])
@@ -307,8 +306,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
             output=args.output or "merged", title=args.title or args.output or "merged",
             designs=specs, drops=list(args.drop or []),
             layout=args.layout, optimize=args.optimize, outline=args.outline,
-            gap=args.gap, columns=args.columns, sheet_layout=args.sheet_layout,
-            sheets_per_page=args.sheets_per_page,
+            gap=args.gap, columns=args.columns,
         )
 
     if not specs:
@@ -359,8 +357,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
         plan_from_resolver(
             resolver, specs, output=plan.output, title=plan.title,
             drops=plan.drops, outline=plan.outline, layout=plan.layout, optimize=plan.optimize, gap=plan.gap,
-            columns=plan.columns, sheet_layout=plan.sheet_layout,
-            sheets_per_page=plan.sheets_per_page,
+            columns=plan.columns,
         ).save(args.save_plan)
         print(f"Decisions saved to {args.save_plan}")
 
@@ -593,12 +590,6 @@ def build_parser() -> argparse.ArgumentParser:
                          help="millimetres between tiled boards (default: 5)")
         sub.add_argument("--columns", type=int, default=0,
                          help="force a column count for the grid layout")
-        sub.add_argument("--sheet-layout", choices=("per-design", "packed", "single"),
-                         default="per-design",
-                         help="one sheet per design (default), several per sheet, "
-                              "or every design on one sheet")
-        sub.add_argument("--sheets-per-page", type=int, default=1,
-                         help="designs per sheet when --sheet-layout packed")
 
     def add_policy(sub):
         sub.add_argument("--default", choices=("join", "split"), default="split",

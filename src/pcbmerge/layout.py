@@ -382,22 +382,15 @@ def parse_outline(text: str) -> tuple[float, float] | None:
     return size
 
 
-def sheet_tiles(sizes: list[tuple[str, float, float]], per_sheet: int,
-                gap: float = 25.4) -> dict[str, tuple[int, float, float]]:
-    """Assign designs to sheets and positions when several share a page.
+def sheet_tiles(sizes: list[tuple[str, float, float]],
+                gap: float = 25.4) -> dict[str, tuple[float, float]]:
+    """Lay every design out on one sheet.
 
-    Each page is packed independently, so a page of one big and three small
-    drawings does not pay for the big one four times over.
+    Rows are sized to their tallest drawing rather than to the largest one
+    anywhere, so a page of one big and three small drawings does not pay for
+    the big one four times over.
 
-    Returns design -> (sheet index, x, y of the drawing's bottom-left corner).
+    Returns design -> (x, y of the drawing's bottom-left corner).
     """
-    tiles: dict[str, tuple[int, float, float]] = {}
-    per_sheet = max(1, per_sheet)
-
-    for start in range(0, len(sizes), per_sheet):
-        page = sizes[start:start + per_sheet]
-        sheet = start // per_sheet
-        packed = shelf_positions([(w, h) for _, w, h in page], gap, aspect=SHEET_ASPECT)
-        for (name, _, _), (x, y, _, _) in zip(page, packed):
-            tiles[name] = (sheet, x, y)
-    return tiles
+    packed = shelf_positions([(w, h) for _, w, h in sizes], gap, aspect=SHEET_ASPECT)
+    return {name: (x, y) for (name, _, _), (x, y, _, _) in zip(sizes, packed)}

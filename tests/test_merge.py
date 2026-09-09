@@ -55,20 +55,19 @@ def test_every_reference_designator_is_unique(designs, tmp_path):
     assert len(prefixes) == 2, "each design keeps its own prefix"
 
 
-def test_each_design_becomes_its_own_sheet(designs, tmp_path):
+def test_every_design_lands_on_one_sheet(designs, tmp_path):
     report, _ = run_merge(designs, tmp_path / "out")
-    sch = EagleDoc.load(report.sch_path)
-    sheets = sch.sheets()
-    assert len(sheets) == 2
-    labels = [s.findtext("description") for s in sheets]
-    assert labels == ["alpha_board", "beta_board"]
+    sheets = EagleDoc.load(report.sch_path).sheets()
+    assert len(sheets) == 1
+    assert sheets[0].findtext("description") == "alpha_board, beta_board"
 
 
-def test_ground_is_one_net_across_both_sheets(designs, tmp_path):
+def test_ground_is_one_net_across_both_designs(designs, tmp_path):
     report, _ = run_merge(designs, tmp_path / "out")
     sch = EagleDoc.load(report.sch_path)
     grounds = [n for n in sch.nets() if n.get("name") == "GND"]
-    assert len(grounds) == 2, "GND appears on each sheet under one name"
+    assert len(grounds) == 1, "one net element per name per sheet"
+    assert len(grounds[0].findall("segment")) >= 2, "a segment from each design"
 
     brd = EagleDoc.load(report.brd_path)
     gnd = [s for s in brd.signals() if s.get("name") == "GND"]

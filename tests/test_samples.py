@@ -30,7 +30,7 @@ def test_all_eight_designs_merge(merged):
     report, _, prefixes = merged
     assert len(report.designs) == 8
     assert report.parts > 300
-    assert report.sheets == 8
+    assert report.sheets == 1
 
 
 def test_ground_joins_across_every_design(merged):

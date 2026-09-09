@@ -209,8 +209,6 @@ def _plan(body: dict) -> tuple[list[DesignSpec], MergePlan]:
         optimize=options.get("optimize", "balanced"),
         outline=options.get("outline", MergePlan().outline),
         gap=float(options.get("gap", 5.0)),
-        sheet_layout=options.get("sheetLayout", "per-design"),
-        sheets_per_page=int(options.get("sheetsPerPage", 1)),
     )
     return specs, plan
 
@@ -357,7 +355,6 @@ def run_merge(body: dict) -> dict:
             resolver, specs, output=plan.output, title=plan.output,
             drops=plan.drops, layout=plan.layout, optimize=plan.optimize,
             outline=plan.outline, gap=plan.gap,
-            sheet_layout=plan.sheet_layout, sheets_per_page=plan.sheets_per_page,
         ).save(out_dir / f"{stem}-plan.json"))
 
     return {

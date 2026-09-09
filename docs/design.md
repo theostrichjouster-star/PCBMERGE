@@ -206,27 +206,35 @@ its pads, translated by each board's placement. Element origins substitute for e
 pad positions: enough to rank arrangements, and it avoids resolving package pad
 geometry through rotation.
 
-### Schematic sheets
+### The schematic sheet
 
-Per-design sheets need no translation at all, which is why that is the default: the
-pages keep their original coordinates and look exactly as drawn.
+Everything goes on one sheet. Each design's content is translated to a tile after
+measuring its extent with page borders excluded, and the sheet is shelf-packed
+with a wider aspect target than the board uses, because a drawing is read on
+screen rather than cut from a panel.
 
-`packed` and `single` share one code path; `single` is just a page size equal to the
-instance count. Each design's content is translated to a tile after measuring its
-extent with page borders excluded, and each page is shelf-packed on its own so a big
-drawing on page two costs page one nothing. Sheets use a wider aspect target than
-boards, because a drawing is read on screen rather than cut from a panel.
+Designs sharing a sheet have their frame parts dropped, since several overlapping
+A4 borders are only noise, and each gains a caption on layer 97 placed in a gap
+the tile reserves above itself. A design merged on its own is not translated at
+all, so it keeps the coordinates it was drawn at.
 
-Designs sharing a sheet have their frame parts dropped, since several overlapping A4
-borders are only noise. Dropped parts are skipped in both the parts list and the
-instance list. Each block gains a caption on layer 97, placed in a gap the tile
-reserves above itself, so one crowded page stays navigable.
+Sharing a sheet forces net folding. EAGLE writes one `<net>` per name per sheet
+with several `<segment>` children, so two elements named `GND` on one page is not
+a form it accepts. `_absorb_named()` moves segments into the first element of that
+name instead.
 
-Sharing a sheet also forces net folding. EAGLE writes one `<net>` per name per sheet
-with several `<segment>` children, so two elements named `GND` on one page is not a
-form it accepts. `_absorb_named()` moves segments into the first element of that name
-instead. Per-design sheets never hit this, because each sheet holds one design's copy
-of a net; it only appears once designs meet on a page.
+### Why there is only one sheet
+
+A per-design sheet mode existed and was removed. Its sheets carried an empty
+`<moduleinsts/>` container, produced because the builder created every child tag
+whether or not the source had one. No hand-drawn EAGLE file carries that element,
+and 9.6.2 would not reliably open the result. The single-sheet builder never hit
+it, because it only copied across the tags its page already had.
+
+`_sheet_body()` now emits only `plain`, `instances`, `busses` and `nets`, and a
+test asserts a merged sheet's children match what a drawn sheet contains. The
+lesson generalises: writing a structurally valid element that real files never
+contain is still a way to produce a file the tool will not open.
 
 ## Why joined nets stay unrouted
 
