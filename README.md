@@ -1,7 +1,8 @@
 # pcbmerge
 
-Combine several Autodesk EAGLE designs into a single schematic and board, resolving
-net names automatically where the answer is certain and asking where it is not.
+Combine several PCB designs into a single schematic and board, resolving net names
+automatically where the answer is certain and asking where it is not. Reads EAGLE
+(`.sch` / `.brd`) and KiCad (`.kicad_pcb`), and writes EAGLE.
 
 Point it at a folder of `.sch`/`.brd` pairs and it produces one merged pair that
 EAGLE will open: every part renamed apart, every library conflict preserved, the
@@ -18,6 +19,81 @@ Place several copies of a design by appending `*N`:
 pcbmerge merge controller.sch relay.sch*4 -o farm --out-dir out
 ```
 
+## The visual front end
+
+The command line makes you decide before you can see anything. `pcbmerge web`
+serves the same engine over HTTP so you can decide against a picture:
+
+```bash
+pcbmerge web examples/adafruit
+```
+
+That opens a browser on `127.0.0.1:8765` showing the merged board as it would be
+built: the outline, every source board packed inside it, and a copper line for
+each net that still needs routing. Change anything on the left and the picture
+redraws.
+
+**Choose folder** opens your operating system's own folder dialog. A browser will
+not tell a page where a chosen folder really lives, so the server opens the dialog
+instead, in a separate process: a modal window on a request thread would hold the
+server for as long as you left it open. You can still paste a path into the box
+beside it, which is the only way in on a machine with no display.
+
+- **Designs** tick designs in or out and set how many copies of each
+- **Board** outline, gap, tiling and what the placement search optimises for
+- **Parts to leave out** every kind of part with its copy count, the ones nothing
+  is wired to starred, and one button to drop all of them
+- **Nets** what joined automatically, what needs a decision with a join/split
+  toggle, and the pairs that look like the same wire under different names
+- **Connections** wire one design's net to another's
+- **Write files** name, folder, and the Merge button
+
+Hovering a net highlights its airwires on the board; hovering a board names it.
+The numbers across the top are live, so the cost of a choice is visible before
+you commit to it. Joining the I2C bus on the eight sample designs takes the
+airwire total from 425 mm to 556 mm, which is the sort of thing worth seeing
+while you decide rather than afterwards.
+
+Nothing is written until you press Merge. Everything else only reads.
+
+The server binds to the loopback address and reads and writes files as you, which
+is right for a tool you start yourself and wrong for anything exposed to a
+network. It needs no internet connection and loads nothing from a CDN.
+
+## KiCad designs
+
+A `.kicad_pcb` can go into a merge beside EAGLE files, with no flag and nothing to
+convert by hand. Point the tool at a folder holding both and it works out which is
+which.
+
+```bash
+pcbmerge merge examples/adafruit -o combo --out-dir out --yes
+```
+
+The board is the source of truth. A KiCad board carries the whole netlist, every
+footprint with its pads and their nets, the copper and the outline, which is
+everything a merge needs. Footprints become packages, nets become signals, tracks
+and vias and pours come across, and the outline lands on the Dimension layer.
+
+Two conventions differ and both are handled. KiCad measures Y downwards where EAGLE
+measures it up, so every Y is negated and rotations change sign with it. Footprints
+on the back come across mirrored.
+
+Net names are normalised so they can match. A hierarchical KiCad name like
+`/Sheet One/VCC_3V3` becomes `VCC_3V3`, or no rail would ever line up with an EAGLE
+design's. Names KiCad invented, the `Net-(U1-Pad2)` form, become `N$1` and so are
+kept apart exactly as EAGLE's own anonymous nets are.
+
+**The schematic is drawn from the netlist**, not from the `.kicad_sch`. Each part
+becomes a box with one pin per pad, and connections are carried on net labels. It is
+not the drawing the engineer made and is not meant to be: it is a faithful, openable
+statement of the same connections, consistent with the board by construction. The
+merge says so in its report rather than leaving you to notice.
+
+Converting a KiCad schematic drawing faithfully is a separate and much larger job:
+symbols, wires, buses, hierarchical labels and sheet pins all have to be redrawn in
+EAGLE's model. The netlist route gives a correct merge today.
+
 ## The problem it solves
 
 Dropping two EAGLE designs into one file breaks in four separate ways at once.
@@ -30,6 +106,8 @@ Dropping two EAGLE designs into one file breaks in four separate ways at once.
 - **Net names mean different things.** `GND` in two designs is one node. `N$1` in
   two designs is two unrelated nodes. `VCC` might be either, and only you know.
 - **Boards sit on top of each other.** Every design is drawn near its own origin.
+- **Two tools, two file formats.** KiCad stores S-expressions and measures Y the
+  other way up.
 
 pcbmerge handles all four, and keeps the schematic and the board consistent with
 each other, which is what EAGLE requires before it will let you route anything.
@@ -263,41 +341,25 @@ the sub-boards need 55 x 333 mm and overflow the 150 x 100 mm outline;
 give --outline a bigger size or move them by hand
 ```
 
-## Schematic layout
+## The schematic
 
-Three options, set with `--sheet-layout`:
+Every design lands on one sheet. Each drawing is packed into rows sized to their
+tallest member, so a page of one large and three small drawings does not pay for
+the large one four times, and each block is captioned with its design name on
+layer 97 (Info) so a crowded page stays navigable.
 
-| Value | Result |
-| --- | --- |
-| `per-design` | one sheet per design instance (default) |
-| `packed` | several designs per sheet, count set by `--sheets-per-page` |
-| `single` | every design on one sheet |
+Page borders are dropped, since eight overlapping A4 frames are only noise. A
+single design merged on its own keeps both its border and its original
+coordinates.
 
-The default leaves each design's coordinates untouched, so every page looks exactly
-as it was drawn. Because EAGLE treats one net name as one net across all sheets,
-joining a rail needs no wires drawn between pages.
-
-To put everything on one sheet:
-
-```bash
-pcbmerge merge examples/adafruit -o combo --out-dir out --sheet-layout single
-```
-
-The eight sample designs become a single 705 by 576 mm sheet. Each design is packed
-into rows sized to their tallest member rather than into uniform cells, so a page of
-one large and three small drawings does not pay for the large one four times.
-
-Two things change when designs share a sheet. Page borders are dropped, since eight
-overlapping A4 frames are only noise. And each block gets a caption naming its design,
-drawn on layer 97 (Info) so it never affects connectivity.
-
-Nets that were joined also fold into a single element per name. EAGLE writes one
-`<net>` per name per sheet carrying several segments, and two same-named nets on one
-sheet is not a form it accepts. On the samples, `GND` becomes one net with 88
+Nets of the same name fold into one element carrying several segments. EAGLE
+writes one `<net>` per name per sheet, and two elements named `GND` on one sheet
+is not a form it accepts. On the eight samples, `GND` becomes one net with 88
 segments reaching all eight designs.
 
-One sheet stops being practical at some size. Past about a metre and a half the merge
-says so and suggests `--sheet-layout packed` with a page count instead.
+Multi-sheet output was built and withdrawn. It emitted an empty `<moduleinsts/>`
+container that no hand-drawn file carries, and EAGLE 9.6.2 would not reliably open
+the result. One sheet is what works, so one sheet is what there is.
 
 ## Commands
 
@@ -344,7 +406,6 @@ Useful flags:
 - `--no-suggest` skip the differently-named-net questions
 - `--layout pack|grid|row|column` and `--optimize balanced|airwire|area|none`
 - `--outline 150x100`, or `keep` / `none`
-- `--sheet-layout per-design|packed|single` and `--sheets-per-page 4`
 - `--gap 5` and `--columns 3`
 - `--prefix LEFT --prefix RIGHT` choose reference-designator prefixes yourself
 - `--save-plan used.json` record the answers you gave
@@ -386,9 +447,16 @@ A plan also carries copy counts, hand-made links, and the layout settings:
   "drops": ["MOUNTINGHOLE", "FIDUCIAL"],
   "layout": "pack",
   "optimize": "balanced",
-  "outline": "150x100",
-  "sheet_layout": "per-design"
+  "outline": "150x100"
 }
+```
+
+### web
+
+Open the visual front end described above.
+
+```bash
+pcbmerge web [folder] [--port 8765] [--no-browser]
 ```
 
 ### parts
@@ -412,8 +480,8 @@ pcbmerge check out/combo
 
 ## What the merged files look like
 
-**Schematic.** Each design instance becomes its own sheet, named after the design it
-came from, unless you pack several per page or ask for a single sheet.
+**Schematic.** One sheet holding every design, each captioned, with same-named
+nets folded into a single element.
 
 **Board.** Source boards are tiled into a packed arrangement inside a single
 outline, each moved as a rigid body so relative placement, rotation and routing
@@ -456,6 +524,8 @@ That puts a `pcbmerge` command on your PATH. Check it with:
 pcbmerge --version
 ```
 
+If you would rather click than type, `pcbmerge web` opens the visual front end.
+
 Run the tests with `pip install -e ".[dev]"` then `pytest`.
 
 ## A first run
@@ -484,7 +554,11 @@ pcbmerge check out/combo
 
 ## Limitations
 
-- EAGLE XML only (`.sch` / `.brd`). KiCad and Altium are not supported.
+- Writes EAGLE only. Reads EAGLE and KiCad; Altium is not supported.
+- A KiCad schematic's drawing is not converted. The schematic is rebuilt from the
+  board netlist as boxes with one pin per pad.
+- KiCad copper pours come across as their outline polygons, not as the filled shape
+  KiCad computed.
 - Design rules, autorouter settings and global attributes come from the first
   design; conflicts elsewhere are reported as warnings, not merged.
 - Buses are copied per sheet but never joined across designs.

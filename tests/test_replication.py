@@ -91,7 +91,7 @@ def test_rails_stay_common_across_every_copy(relay, tmp_path):
     report, _, _ = run(relay, tmp_path / "out", 4)
     sch = EagleDoc.load(report.sch_path)
     names = [n.get("name") for n in sch.nets()]
-    assert names.count("GND") == 4, "one GND net drawn on each copy's sheet"
+    assert names.count("GND") == 1, "one GND net element for the whole sheet"
     assert not any(n.endswith("_GND") for n in names)
 
     brd = EagleDoc.load(report.brd_path)
@@ -110,7 +110,7 @@ def test_replica_signals_can_be_made_common(relay, tmp_path):
     report, _, prefixes = run(relay, tmp_path / "out", 3, replicas=Action.JOIN)
     sch = EagleDoc.load(report.sch_path)
     names = [n.get("name") for n in sch.nets()]
-    assert names.count("SIGNAL") == 3
+    assert names.count("SIGNAL") == 1, "one element, three segments"
     assert f"{prefixes[0]}SIGNAL" not in names
 
 
@@ -133,11 +133,11 @@ def test_copies_do_not_overlap_on_the_board(relay, tmp_path):
             assert not (a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3])
 
 
-def test_each_copy_becomes_its_own_sheet(relay, tmp_path):
+def test_every_copy_shares_the_one_sheet(relay, tmp_path):
     report, _, _ = run(relay, tmp_path / "out", 3)
-    sch = EagleDoc.load(report.sch_path)
-    labels = [s.findtext("description") for s in sch.sheets()]
-    assert labels == ["relay #1", "relay #2", "relay #3"]
+    sheets = EagleDoc.load(report.sch_path).sheets()
+    assert len(sheets) == 1
+    assert sheets[0].findtext("description") == "relay #1, relay #2, relay #3"
 
 
 def test_the_report_says_how_many_copies_were_placed(relay, tmp_path):
@@ -156,4 +156,5 @@ def test_cli_places_copies_from_the_star_syntax(relay, tmp_path):
                  "--out-dir", str(tmp_path / "out"), "-o", "combo", "--yes"])
     assert code == 0
     sch = EagleDoc.load(tmp_path / "out" / "combo.sch")
-    assert len(sch.sheets()) == 3
+    assert len(sch.sheets()) == 1
+    assert len(sch.parts()) == 6, "two parts from each of three copies"

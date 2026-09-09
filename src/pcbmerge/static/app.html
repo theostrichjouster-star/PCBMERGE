@@ -1,0 +1,946 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pcbmerge</title>
+<style>
+  :root {
+    --bg: #0e1116;
+    --panel: #161b22;
+    --panel-2: #1c232c;
+    --line: #2a3038;
+    --line-soft: #222831;
+    --ink: #e6edf3;
+    --ink-dim: #93a1b0;
+    --ink-faint: #6b7885;
+    --copper: #d98b48;
+    --green: #4ec9a5;
+    --blue: #58a6ff;
+    --amber: #e3b341;
+    --red: #f0776c;
+    --radius: 7px;
+    --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 13px/1.5 ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  button, input, select { font: inherit; color: inherit; }
+
+  /* ---------- shell ---------- */
+  .app { display: grid; grid-template-rows: auto 1fr; height: 100vh; }
+
+  header {
+    display: flex; align-items: center; gap: 14px;
+    padding: 10px 16px; background: var(--panel);
+    border-bottom: 1px solid var(--line);
+  }
+  .brand { display: flex; align-items: baseline; gap: 9px; }
+  .brand b { font-size: 15px; letter-spacing: -0.01em; }
+  .brand span { color: var(--ink-faint); font-size: 11px; font-family: var(--mono); }
+  .grow { flex: 1; }
+
+  .path-box { display: flex; gap: 0; flex: 1; max-width: 700px; }
+  .path-box input {
+    flex: 1; padding: 7px 11px; background: var(--bg);
+    border: 1px solid var(--line); border-inline: 0;
+    border-radius: 0; font-family: var(--mono); font-size: 12px;
+  }
+  .path-box input:focus { outline: none; border-color: var(--blue); }
+  .path-box button { border-radius: 0 var(--radius) var(--radius) 0; }
+  .path-box button.lead {
+    border-radius: var(--radius) 0 0 var(--radius); white-space: nowrap;
+    color: var(--ink);
+  }
+  .placeholder button { margin-top: 4px; justify-self: center; }
+
+  button {
+    padding: 7px 13px; background: var(--panel-2); color: var(--ink);
+    border: 1px solid var(--line); border-radius: var(--radius);
+    cursor: pointer; transition: background .12s, border-color .12s;
+  }
+  button:hover:not(:disabled) { background: #242c36; border-color: #3a434e; }
+  button:disabled { opacity: .45; cursor: default; }
+  button.primary {
+    background: var(--green); color: #06231c; border-color: var(--green);
+    font-weight: 600;
+  }
+  button.primary:hover:not(:disabled) { background: #63dfba; border-color: #63dfba; }
+  button.small { padding: 3px 8px; font-size: 11px; }
+
+  main { display: grid; grid-template-columns: 420px 1fr; min-height: 0; }
+  @media (max-width: 980px) {
+    main { grid-template-columns: 1fr; grid-template-rows: minmax(340px, 45vh) 1fr; }
+    .stage { order: -1; border-bottom: 1px solid var(--line); }
+    .controls { border-right: 0; }
+  }
+
+  /* ---------- left panel ---------- */
+  .controls {
+    overflow-y: auto; border-right: 1px solid var(--line);
+    background: var(--panel);
+  }
+  .controls::-webkit-scrollbar { width: 9px; }
+  .controls::-webkit-scrollbar-thumb { background: #2b333d; border-radius: 5px; }
+
+  section { border-bottom: 1px solid var(--line-soft); }
+  .head {
+    display: flex; align-items: center; gap: 9px; width: 100%;
+    padding: 11px 16px; background: none; border: 0; border-radius: 0;
+    cursor: pointer; text-align: left;
+  }
+  .head:hover { background: var(--panel-2); }
+  .head h2 {
+    margin: 0; font-size: 12px; font-weight: 600;
+    letter-spacing: .05em; text-transform: uppercase; color: var(--ink-dim);
+  }
+  .head .chev { color: var(--ink-faint); transition: transform .15s; font-size: 10px; }
+  section.open .chev { transform: rotate(90deg); }
+  .tally {
+    margin-left: auto; padding: 1px 7px; border-radius: 10px;
+    background: var(--panel-2); color: var(--ink-faint);
+    font-family: var(--mono); font-size: 10.5px;
+  }
+  .tally.act { background: rgba(78,201,165,.15); color: var(--green); }
+  .body { display: none; padding: 2px 16px 16px; }
+  section.open .body { display: block; }
+
+  .row { display: flex; align-items: center; gap: 9px; padding: 5px 0; }
+  .row + .row { border-top: 1px solid var(--line-soft); }
+  .row .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+               white-space: nowrap; }
+  .sub { color: var(--ink-faint); font-size: 11px; }
+  .mono { font-family: var(--mono); font-size: 11.5px; }
+
+  label.field { display: block; margin: 10px 0 0; }
+  label.field > span {
+    display: block; margin-bottom: 4px; color: var(--ink-dim); font-size: 11px;
+  }
+  input[type=text], input[type=number], select {
+    width: 100%; padding: 6px 9px; background: var(--bg);
+    border: 1px solid var(--line); border-radius: var(--radius);
+    font-family: var(--mono); font-size: 12px;
+  }
+  input:focus, select:focus { outline: none; border-color: var(--blue); }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+  input[type=checkbox] { accent-color: var(--green); width: 14px; height: 14px; }
+
+  .stepper { display: flex; align-items: center; gap: 0; }
+  .stepper button {
+    width: 22px; padding: 0; height: 22px; border-radius: 0; line-height: 1;
+  }
+  .stepper button:first-child { border-radius: 4px 0 0 4px; }
+  .stepper button:last-child { border-radius: 0 4px 4px 0; }
+  .stepper span {
+    width: 26px; text-align: center; font-family: var(--mono);
+    border-block: 1px solid var(--line); height: 22px; line-height: 21px;
+    background: var(--bg); font-size: 11.5px;
+  }
+
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 5px;
+         overflow: hidden; }
+  .seg button {
+    padding: 2px 10px; border: 0; border-radius: 0; font-size: 11px;
+    background: transparent; color: var(--ink-faint);
+  }
+  .seg button.on { background: var(--green); color: #06231c; font-weight: 600; }
+  /* Split is the quieter choice but still has to look chosen. */
+  .seg button.on.split { background: #3a434e; color: var(--ink); font-weight: 600; }
+
+  .chip {
+    display: inline-block; padding: 0 6px; border-radius: 4px;
+    font-family: var(--mono); font-size: 10px; letter-spacing: .02em;
+  }
+  .chip.ground { background: rgba(78,201,165,.15); color: var(--green); }
+  .chip.rail   { background: rgba(88,166,255,.15); color: var(--blue); }
+  .chip.ambiguous { background: rgba(227,179,65,.15); color: var(--amber); }
+  .chip.signal { background: rgba(217,139,72,.15); color: var(--copper); }
+  .chip.replica { background: rgba(147,161,176,.15); color: var(--ink-dim); }
+  .chip.mech { background: rgba(107,120,133,.16); color: var(--ink-faint); }
+
+  .note { color: var(--ink-faint); font-size: 11.5px; margin: 8px 0 0; }
+  .empty { color: var(--ink-faint); padding: 10px 0; font-size: 12px; }
+
+  .card {
+    background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 10px; margin-top: 9px;
+  }
+  .card .why { color: var(--ink-faint); font-size: 11px; margin-top: 3px; }
+
+  .warn {
+    margin: 9px 0 0; padding: 8px 10px; border-radius: var(--radius);
+    background: rgba(227,179,65,.09); border: 1px solid rgba(227,179,65,.3);
+    color: #f0d089; font-size: 11.5px;
+  }
+  .err {
+    margin: 9px 16px; padding: 9px 11px; border-radius: var(--radius);
+    background: rgba(240,119,108,.1); border: 1px solid rgba(240,119,108,.35);
+    color: #ffb3ac; font-size: 12px;
+  }
+
+  /* ---------- canvas ---------- */
+  .stage { display: grid; grid-template-rows: auto 1fr auto; min-height: 0;
+           background: var(--bg); }
+  .stage-head {
+    display: flex; align-items: center; gap: 18px;
+    padding: 10px 18px; border-bottom: 1px solid var(--line-soft);
+  }
+  .stat b {
+    display: block; font-family: var(--mono); font-size: 15px; font-weight: 600;
+  }
+  .stat span { color: var(--ink-faint); font-size: 10.5px;
+               text-transform: uppercase; letter-spacing: .05em; }
+  .stat.green b { color: var(--green); }
+  .stat.copper b { color: var(--copper); }
+
+  .canvas-wrap { position: relative; overflow: hidden; min-height: 240px; }
+  svg { width: 100%; height: 100%; display: block; }
+  .outline { fill: rgba(78,201,165,.03); stroke: var(--green); stroke-width: 1.4;
+             stroke-dasharray: 7 4; }
+  .board-rect {
+    fill: rgba(88,166,255,.09); stroke: var(--blue); stroke-width: 1.2;
+    cursor: pointer; transition: fill .12s;
+  }
+  .board-rect:hover, .board-rect.hot { fill: rgba(88,166,255,.24); }
+  .board-label { fill: var(--ink); font-size: 11px; font-family: var(--mono);
+                 pointer-events: none; }
+  .board-size { fill: var(--ink-faint); font-size: 9.5px; font-family: var(--mono);
+                pointer-events: none; }
+  .airwire { stroke: var(--copper); stroke-width: .7; opacity: .3; fill: none; }
+  .airwire.hot { stroke: var(--amber); stroke-width: 1.8; opacity: 1; }
+  .pad-dot { fill: var(--copper); opacity: .55; }
+  .ruler { stroke: var(--line); stroke-width: 1; }
+  .ruler-text { fill: var(--ink-faint); font-size: 9px; font-family: var(--mono); }
+
+  .stage-foot {
+    padding: 9px 18px; border-top: 1px solid var(--line-soft);
+    color: var(--ink-faint); font-size: 11.5px;
+    display: flex; align-items: center; gap: 14px;
+  }
+  .legend { display: flex; align-items: center; gap: 6px; }
+  .swatch { width: 16px; height: 3px; border-radius: 2px; }
+
+  .placeholder {
+    display: grid; place-content: center; gap: 10px; text-align: center;
+    height: 100%; color: var(--ink-faint);
+  }
+  .placeholder b { color: var(--ink-dim); font-size: 14px; }
+
+  .busy { position: absolute; inset: 0; display: grid; place-content: center;
+          background: rgba(14,17,22,.55); backdrop-filter: blur(1px); }
+  .spinner {
+    width: 26px; height: 26px; border: 2px solid var(--line);
+    border-top-color: var(--green); border-radius: 50%;
+    animation: spin .7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .result { padding: 12px 16px 20px; }
+  .result .path {
+    font-family: var(--mono); font-size: 11.5px; color: var(--green);
+    word-break: break-all; padding: 3px 0;
+  }
+  .kv { display: grid; grid-template-columns: 1fr auto; gap: 2px 12px;
+        font-size: 12px; margin: 8px 0; }
+  .kv span:nth-child(even) { font-family: var(--mono); color: var(--ink-dim); }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <header>
+    <div class="brand"><b>pcbmerge</b><span id="version"></span></div>
+    <div class="path-box">
+      <button id="browse" class="lead" title="Pick a folder">Choose folder…</button>
+      <input id="path" type="text" spellcheck="false"
+             placeholder="or paste a path to a folder of .sch files">
+      <button id="scan">Open</button>
+    </div>
+    <div class="grow"></div>
+    <div id="totals" class="sub mono"></div>
+  </header>
+
+  <main>
+    <div class="controls" id="controls">
+      <div id="error"></div>
+
+      <section id="sec-designs" class="open">
+        <button class="head" data-toggle><span class="chev">▶</span>
+          <h2>Designs</h2><span class="tally" id="t-designs">—</span></button>
+        <div class="body" id="designs"><div class="empty">Open a folder to begin.</div></div>
+      </section>
+
+      <section id="sec-board" class="open">
+        <button class="head" data-toggle><span class="chev">▶</span>
+          <h2>Board</h2><span class="tally" id="t-board">—</span></button>
+        <div class="body">
+          <div class="pair">
+            <label class="field"><span>Outline (mm)</span>
+              <input id="o-outline" type="text" value="150x100"></label>
+            <label class="field"><span>Gap (mm)</span>
+              <input id="o-gap" type="number" value="5" min="0" step="0.5"></label>
+          </div>
+          <div class="pair">
+            <label class="field"><span>Tiling</span>
+              <select id="o-layout">
+                <option value="pack">pack</option><option value="grid">grid</option>
+                <option value="row">row</option><option value="column">column</option>
+              </select></label>
+            <label class="field"><span>Optimise for</span>
+              <select id="o-optimize">
+                <option value="balanced">balanced</option>
+                <option value="airwire">airwire</option>
+                <option value="area">area</option>
+                <option value="none">nothing</option>
+              </select></label>
+          </div>
+          <p class="note">Outline takes <span class="mono">150x100</span>,
+             <span class="mono">keep</span> or <span class="mono">none</span>.
+             Every design goes on one schematic sheet.</p>
+        </div>
+      </section>
+
+      <section id="sec-parts">
+        <button class="head" data-toggle><span class="chev">▶</span>
+          <h2>Parts to leave out</h2><span class="tally" id="t-parts">—</span></button>
+        <div class="body" id="parts"><div class="empty">Nothing loaded.</div></div>
+      </section>
+
+      <section id="sec-nets" class="open">
+        <button class="head" data-toggle><span class="chev">▶</span>
+          <h2>Nets</h2><span class="tally" id="t-nets">—</span></button>
+        <div class="body" id="nets"><div class="empty">Nothing loaded.</div></div>
+      </section>
+
+      <section id="sec-connect">
+        <button class="head" data-toggle><span class="chev">▶</span>
+          <h2>Connections</h2><span class="tally" id="t-connect">—</span></button>
+        <div class="body" id="connect"><div class="empty">Nothing loaded.</div></div>
+      </section>
+
+      <section id="sec-out" class="open">
+        <button class="head" data-toggle><span class="chev">▶</span>
+          <h2>Write files</h2><span class="tally" id="t-out">—</span></button>
+        <div class="body">
+          <div class="pair">
+            <label class="field"><span>Name</span>
+              <input id="o-output" type="text" value="merged"></label>
+            <label class="field"><span>Folder</span>
+              <input id="o-outdir" type="text" value="out"></label>
+          </div>
+          <label class="row" style="margin-top:10px">
+            <input id="o-saveplan" type="checkbox" checked>
+            <span class="name">Also save the decisions as a plan</span></label>
+          <button id="merge" class="primary" style="width:100%;margin-top:12px" disabled>
+            Merge</button>
+          <div id="result"></div>
+        </div>
+      </section>
+    </div>
+
+    <div class="stage">
+      <div class="stage-head" id="stage-head">
+        <div class="stat"><b id="s-size">—</b><span>board</span></div>
+        <div class="stat green"><b id="s-fill">—</b><span>fill</span></div>
+        <div class="stat copper"><b id="s-air">—</b><span>airwire</span></div>
+        <div class="grow"></div>
+        <div class="sub" id="hover-info"></div>
+      </div>
+      <div class="canvas-wrap" id="canvas-wrap">
+        <div class="placeholder" id="placeholder">
+          <b>No designs open</b>
+          <div>Choose the folder holding your .sch and .brd files.</div>
+          <button id="browse-big" class="primary">Choose folder…</button>
+        </div>
+        <svg id="canvas" style="display:none"></svg>
+      </div>
+      <div class="stage-foot">
+        <div class="legend"><span class="swatch" style="background:var(--green)"></span>
+          outline</div>
+        <div class="legend"><span class="swatch" style="background:var(--blue)"></span>
+          source board</div>
+        <div class="legend"><span class="swatch" style="background:var(--copper)"></span>
+          airwire still to route</div>
+        <div class="grow"></div>
+        <span id="foot-note"></span>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script>
+"use strict";
+
+const $ = (id) => document.getElementById(id);
+const el = (tag, cls, text) => {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text !== undefined) n.textContent = text;
+  return n;
+};
+
+const state = {
+  designs: [],
+  drops: [],
+  connections: [],
+  links: [],
+  decisions: {},
+  data: null,
+  hotNet: null,
+};
+
+let seq = 0;
+let timer = null;
+
+// ---------------------------------------------------------------- transport
+
+async function post(route, body) {
+  const res = await fetch(route, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body || {}),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || "request failed");
+  return data;
+}
+
+function showError(message) {
+  $("error").innerHTML = "";
+  if (message) $("error").append(el("div", "err", message));
+}
+
+function payload() {
+  return {
+    designs: state.designs,
+    drops: state.drops,
+    connections: state.connections,
+    links: state.links,
+    decisions: state.decisions,
+    output: $("o-output").value.trim() || "merged",
+    outDir: $("o-outdir").value.trim() || "out",
+    savePlan: $("o-saveplan").checked,
+    options: {
+      outline: $("o-outline").value.trim() || "150x100",
+      gap: parseFloat($("o-gap").value) || 0,
+      layout: $("o-layout").value,
+      optimize: $("o-optimize").value,
+      default: "split",
+      replicas: "split",
+    },
+  };
+}
+
+function busy(on) {
+  const wrap = $("canvas-wrap");
+  let node = wrap.querySelector(".busy");
+  if (on && !node) {
+    node = el("div", "busy");
+    node.append(el("div", "spinner"));
+    wrap.append(node);
+  } else if (!on && node) {
+    node.remove();
+  }
+}
+
+function schedule() {
+  clearTimeout(timer);
+  timer = setTimeout(analyze, 180);
+}
+
+async function analyze() {
+  if (!state.designs.some((d) => d.use)) return;
+  const mine = ++seq;
+  busy(true);
+  try {
+    const data = await post("/api/analyze", payload());
+    if (mine !== seq) return;           // a newer edit already won
+    state.data = data;
+    showError("");
+    render();
+  } catch (err) {
+    if (mine === seq) showError(err.message);
+  } finally {
+    if (mine === seq) busy(false);
+  }
+}
+
+// ------------------------------------------------------------------ scanning
+
+function adopt(data) {
+  state.designs = data.designs;
+  state.drops = [];
+  state.connections = [];
+  state.links = [];
+  state.decisions = {};
+  $("path").value = data.folder;
+  showError("");
+  renderDesigns();
+  $("merge").disabled = false;
+}
+
+async function scan() {
+  const path = $("path").value.trim();
+  if (!path) { browse(); return; }
+  busy(true);
+  try {
+    adopt(await post("/api/scan", { path }));
+    await analyze();
+  } catch (err) {
+    showError(err.message);
+    busy(false);
+  }
+}
+
+async function browse() {
+  // The dialog belongs to the machine, not the page, so it can sit open for
+  // as long as someone likes without anything here timing out.
+  busy(true);
+  $("browse").disabled = true;
+  try {
+    const data = await post("/api/browse", {});
+    if (data.cancelled) return;
+    adopt(data);
+    await analyze();
+  } catch (err) {
+    showError(err.message);
+  } finally {
+    $("browse").disabled = false;
+    if (!state.data) busy(false);
+  }
+}
+
+// ------------------------------------------------------------------ sections
+
+function renderDesigns() {
+  const host = $("designs");
+  host.innerHTML = "";
+  if (!state.designs.length) {
+    host.append(el("div", "empty", "Open a folder to begin."));
+    return;
+  }
+  state.designs.forEach((design) => {
+    const row = el("div", "row");
+    const use = el("input");
+    use.type = "checkbox";
+    use.checked = design.use;
+    use.onchange = () => { design.use = use.checked; schedule(); renderDesigns(); };
+
+    const name = el("div", "name");
+    name.append(el("div", null, design.name));
+    const sub = el("div", "sub mono", design.prefix + (design.brd ? "" : "  no board"));
+    name.append(sub);
+
+    const stepper = el("div", "stepper");
+    const minus = el("button", "", "−");
+    const count = el("span", "", String(design.count));
+    const plus = el("button", "", "+");
+    minus.onclick = () => {
+      design.count = Math.max(1, design.count - 1);
+      count.textContent = design.count; schedule();
+    };
+    plus.onclick = () => {
+      design.count += 1; count.textContent = design.count; schedule();
+    };
+    stepper.append(minus, count, plus);
+
+    row.append(use, name, stepper);
+    host.append(row);
+  });
+  const used = state.designs.filter((d) => d.use);
+  const copies = used.reduce((n, d) => n + d.count, 0);
+  $("t-designs").textContent = copies === used.length
+    ? `${used.length}` : `${used.length} → ${copies}`;
+}
+
+function renderParts() {
+  const host = $("parts");
+  host.innerHTML = "";
+  const parts = state.data.parts;
+  if (!parts.length) { host.append(el("div", "empty", "Nothing to show.")); return; }
+
+  const mech = parts.filter((p) => p.mechanical);
+  if (mech.length) {
+    const bar = el("div", "row");
+    bar.append(el("div", "name sub",
+      `${mech.length} kinds nothing is wired to, ${mech.reduce((n, p) => n + p.count, 0)} parts`));
+    const all = el("button", "small", "Drop all");
+    all.onclick = () => {
+      mech.forEach((p) => { if (!state.drops.includes(p.kind)) state.drops.push(p.kind); });
+      renderParts(); schedule();
+    };
+    const none = el("button", "small", "Keep all");
+    none.onclick = () => { state.drops = []; renderParts(); schedule(); };
+    bar.append(all, none);
+    host.append(bar);
+  }
+
+  parts.slice(0, 60).forEach((part) => {
+    const row = el("div", "row");
+    const box = el("input");
+    box.type = "checkbox";
+    box.checked = state.drops.includes(part.kind);
+    box.onchange = () => {
+      state.drops = box.checked
+        ? [...state.drops, part.kind]
+        : state.drops.filter((k) => k !== part.kind);
+      schedule();
+    };
+    const name = el("div", "name");
+    const title = el("div", "mono", part.kind + (part.value ? " " + part.value : ""));
+    name.append(title);
+    name.append(el("div", "sub", `${part.count} copies in ${part.designs} designs · ${part.note}`));
+    row.append(box, name);
+    if (part.mechanical) row.append(el("span", "chip mech", "decoration"));
+    host.append(row);
+  });
+  $("t-parts").textContent = state.drops.length ? `${state.drops.length} dropped` : "none";
+  $("t-parts").className = "tally" + (state.drops.length ? " act" : "");
+}
+
+function netRow(net, opts) {
+  const row = el("div", "row");
+  const name = el("div", "name");
+  name.append(el("div", "mono", net.spellings.join(" / ")));
+  const where = opts.replica
+    ? `${net.designs.length} copies of ${net.sources[0]}`
+    : `${net.sources.length} designs`;
+  name.append(el("div", "sub", where));
+  row.append(name);
+  row.append(el("span", "chip " + net.kind, net.kind));
+
+  if (opts.decide) {
+    const seg = el("div", "seg");
+    const join = el("button", net.action === "join" ? "on" : "", "join");
+    const split = el("button", net.action === "split" ? "on split" : "", "split");
+    join.onclick = () => {
+      state.decisions[net.key] = { action: "join", name: net.display };
+      schedule();
+    };
+    split.onclick = () => {
+      state.decisions[net.key] = { action: "split" };
+      schedule();
+    };
+    seg.append(join, split);
+    row.append(seg);
+  }
+
+  row.onmouseenter = () => setHot(net.name);
+  row.onmouseleave = () => setHot(null);
+  return row;
+}
+
+function renderNets() {
+  const host = $("nets");
+  host.innerHTML = "";
+  const nets = state.data.nets;
+
+  const block = (title, items, opts) => {
+    if (!items.length) return;
+    const head = el("div", "sub", title);
+    head.style.margin = "12px 0 2px";
+    host.append(head);
+    items.forEach((net) => host.append(netRow(net, opts)));
+  };
+
+  block("Joined automatically", nets.joined.filter((n) => n.decidedBy !== "web"), {});
+  block("Needs a decision", nets.questions, { decide: true });
+  block("One net per copy, unless you say otherwise", nets.replicas,
+        { decide: true, replica: true });
+
+  if (state.data.suggestions.length) {
+    const head = el("div", "sub", "Might be the same wire");
+    head.style.margin = "12px 0 2px";
+    host.append(head);
+    state.data.suggestions.forEach((s) => {
+      const card = el("div", "card");
+      const top = el("div", "row");
+      top.style.padding = "0";
+      const name = el("div", "name mono", `${s.leftName}  ⟷  ${s.rightName}`);
+      top.append(name);
+      const accept = el("button", "small", "Connect");
+      accept.onclick = () => {
+        state.links.push({ keys: [s.left, s.right], name: s.name });
+        schedule();
+      };
+      top.append(accept);
+      card.append(top);
+      card.append(el("div", "why", `${Math.round(s.score * 100)}% · ${s.reason}`));
+      host.append(card);
+    });
+  }
+
+  host.append(el("p", "note",
+    `${nets.anonymous} auto-generated names and ${nets.unique} names used by one design ` +
+    `are kept separate.`));
+
+  // Only the ones still sitting on the default are waiting on you.
+  const open = [...nets.questions, ...nets.replicas]
+    .filter((n) => n.decidedBy === "auto").length;
+  $("t-nets").textContent = open ? `${open} to decide` : `${nets.joined.length} joined`;
+  $("t-nets").className = "tally" + (open ? "" : " act");
+}
+
+function renderConnect() {
+  const host = $("connect");
+  host.innerHTML = "";
+  const available = state.data.availableNets;
+  const names = Object.keys(available);
+
+  state.connections.forEach((conn, index) => {
+    const row = el("div", "row");
+    const text = conn.members.map((m) => `${m.design}:${m.net}`).join("  =  ");
+    row.append(el("div", "name mono", text));
+    const drop = el("button", "small", "Remove");
+    drop.onclick = () => {
+      state.connections.splice(index, 1); renderConnect(); schedule();
+    };
+    row.append(drop);
+    host.append(row);
+  });
+  state.links.forEach((link, index) => {
+    const row = el("div", "row");
+    row.append(el("div", "name mono", link.keys.join("  =  ")));
+    const drop = el("button", "small", "Remove");
+    drop.onclick = () => { state.links.splice(index, 1); renderConnect(); schedule(); };
+    row.append(drop);
+    host.append(row);
+  });
+
+  const card = el("div", "card");
+  const pick = (which) => {
+    const wrap = el("div", "pair");
+    const design = el("select");
+    design.id = which + "-design";
+    names.forEach((n) => design.append(new Option(n, n)));
+    const net = el("select");
+    net.id = which + "-net";
+    const fill = () => {
+      net.innerHTML = "";
+      (available[design.value] || []).forEach((n) => net.append(new Option(n, n)));
+    };
+    design.onchange = fill;
+    fill();
+    wrap.append(design, net);
+    return wrap;
+  };
+  card.append(el("div", "sub", "Wire one design's net to another's"));
+  card.append(pick("a"));
+  const mid = el("div", "sub", "to");
+  mid.style.margin = "6px 0 2px";
+  card.append(mid);
+  card.append(pick("b"));
+
+  const add = el("button", "small", "Connect");
+  add.style.marginTop = "9px";
+  add.onclick = () => {
+    const a = { design: $("a-design").value, net: $("a-net").value };
+    const b = { design: $("b-design").value, net: $("b-net").value };
+    if (a.design === b.design) { showError("those are on the same design"); return; }
+    state.connections.push({ members: [a, b], name: a.net });
+    showError("");
+    renderConnect();
+    schedule();
+  };
+  card.append(add);
+  host.append(card);
+
+  const total = state.connections.length + state.links.length;
+  $("t-connect").textContent = total ? `${total}` : "none";
+  $("t-connect").className = "tally" + (total ? " act" : "");
+}
+
+// -------------------------------------------------------------------- canvas
+
+function setHot(net) {
+  state.hotNet = net;
+  document.querySelectorAll(".airwire").forEach((wire) => {
+    wire.classList.toggle("hot", net !== null && wire.dataset.net === net);
+  });
+  $("hover-info").textContent = net ? `net ${net}` : "";
+}
+
+function drawBoard() {
+  const board = state.data.board;
+  const svg = $("canvas");
+  const wrap = $("canvas-wrap");
+  svg.innerHTML = "";
+  svg.style.display = "block";
+  $("placeholder").style.display = "none";
+
+  const W = wrap.clientWidth || 800;
+  const H = wrap.clientHeight || 600;
+  const pad = 34;
+
+  // World bounds: the outline if there is one, else whatever was placed.
+  let minX = 0, minY = 0, maxX = 0, maxY = 0;
+  if (board.outline) {
+    maxX = board.outline[0]; maxY = board.outline[1];
+  }
+  board.placements.forEach((p) => {
+    minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
+    maxX = Math.max(maxX, p.x + p.width); maxY = Math.max(maxY, p.y + p.height);
+  });
+  const worldW = Math.max(1, maxX - minX);
+  const worldH = Math.max(1, maxY - minY);
+  const k = Math.min((W - pad * 2) / worldW, (H - pad * 2) / worldH);
+  const offX = (W - worldW * k) / 2;
+  const offY = (H - worldH * k) / 2;
+
+  const sx = (x) => offX + (x - minX) * k;
+  const sy = (y) => offY + (maxY - y) * k;   // millimetres are y-up, screens are not
+
+  const ns = "http://www.w3.org/2000/svg";
+  const add = (tag, attrs, cls) => {
+    const node = document.createElementNS(ns, tag);
+    for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
+    if (cls) node.setAttribute("class", cls);
+    svg.append(node);
+    return node;
+  };
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+
+  if (board.outline) {
+    add("rect", {
+      x: sx(0), y: sy(board.outline[1]),
+      width: board.outline[0] * k, height: board.outline[1] * k,
+    }, "outline");
+    const label = add("text", { x: sx(0), y: sy(board.outline[1]) - 8 }, "ruler-text");
+    label.textContent = `${board.outline[0]} × ${board.outline[1]} mm`;
+  }
+
+  board.airwires.forEach((wire) => {
+    const points = wire.points.map((p) => `${sx(p.x)},${sy(p.y)}`).join(" ");
+    const node = add("polyline", { points }, "airwire");
+    node.dataset.net = wire.net;
+    wire.points.forEach((p) => add("circle",
+      { cx: sx(p.x), cy: sy(p.y), r: 1.6 }, "pad-dot"));
+  });
+
+  board.placements.forEach((p) => {
+    const rect = add("rect", {
+      x: sx(p.x), y: sy(p.y + p.height),
+      width: p.width * k, height: p.height * k, rx: 2,
+    }, "board-rect");
+    rect.onmouseenter = () => {
+      rect.classList.add("hot");
+      $("hover-info").textContent =
+        `${p.design} · ${p.width.toFixed(1)} × ${p.height.toFixed(1)} mm`;
+    };
+    rect.onmouseleave = () => {
+      rect.classList.remove("hot");
+      $("hover-info").textContent = "";
+    };
+    // Only label a board that has room for the words.  Drawing them regardless
+    // turns a crowded arrangement into a pile of overlapping text.
+    const boxW = p.width * k;
+    const boxH = p.height * k;
+    const fits = Math.floor((boxW - 12) / 6.1);
+    if (boxH > 22 && fits > 3) {
+      const short = p.design.length > fits
+        ? p.design.slice(0, Math.max(3, fits - 1)) + "…"
+        : p.design;
+      const label = add("text",
+        { x: sx(p.x) + 6, y: sy(p.y + p.height) + 15 }, "board-label");
+      label.textContent = short;
+    }
+    if (boxH > 40 && boxW > 66) {
+      const size = add("text",
+        { x: sx(p.x) + 6, y: sy(p.y + p.height) + 28 }, "board-size");
+      size.textContent = `${p.width.toFixed(1)} × ${p.height.toFixed(1)}`;
+    }
+  });
+
+  const stats = board.stats;
+  $("s-size").textContent = stats.width
+    ? `${stats.width} × ${stats.height}` : "—";
+  $("s-fill").textContent = stats.fill ? `${stats.fill}%` : "—";
+  $("s-air").textContent = stats.airwire ? `${Math.round(stats.airwire)} mm` : "—";
+  $("foot-note").textContent =
+    `${board.placements.length} boards · ${board.airwires.length} nets span more than one`;
+}
+
+// -------------------------------------------------------------------- render
+
+function render() {
+  renderDesigns();
+  renderParts();
+  renderNets();
+  renderConnect();
+  drawBoard();
+
+  const totals = state.data.totals;
+  $("totals").textContent =
+    `${totals.parts} parts · ${totals.instances} boards` +
+    (totals.dropped ? ` · ${totals.dropped} left out` : "");
+  $("t-board").textContent = $("o-outline").value.trim();
+
+  const warnings = state.data.warnings;
+  const host = $("nets");
+  warnings.slice(0, 4).forEach((w) => host.append(el("div", "warn", w)));
+}
+
+async function runMerge() {
+  busy(true);
+  $("merge").disabled = true;
+  try {
+    const out = await post("/api/merge", payload());
+    const host = $("result");
+    host.innerHTML = "";
+    host.append(el("div", "sub", "Written"));
+    if (out.sch) host.append(el("div", "path", out.sch));
+    if (out.brd) host.append(el("div", "path", out.brd));
+    if (out.plan) host.append(el("div", "path", out.plan));
+    const kv = el("div", "kv");
+    const add = (k, v) => { kv.append(el("span", null, k), el("span", null, String(v))); };
+    add("parts", out.parts);
+    add("board elements", out.elements);
+    add("sheets", out.sheets);
+    add("signals", out.signals);
+    if (out.dropped) add("left out", out.dropped);
+    host.append(kv);
+    out.warnings.slice(0, 6).forEach((w) => host.append(el("div", "warn", w)));
+    $("t-out").textContent = "written";
+    $("t-out").className = "tally act";
+    showError("");
+  } catch (err) {
+    showError(err.message);
+  } finally {
+    busy(false);
+    $("merge").disabled = false;
+  }
+}
+
+// ---------------------------------------------------------------------- wire
+
+document.querySelectorAll("[data-toggle]").forEach((head) => {
+  head.onclick = () => head.parentElement.classList.toggle("open");
+});
+$("scan").onclick = scan;
+$("browse").onclick = browse;
+$("browse-big").onclick = browse;
+$("path").onkeydown = (e) => { if (e.key === "Enter") scan(); };
+$("merge").onclick = runMerge;
+["o-outline", "o-gap", "o-layout", "o-optimize"]
+  .forEach((id) => { $(id).oninput = schedule; $(id).onchange = schedule; });
+window.addEventListener("resize", () => { if (state.data) drawBoard(); });
+
+fetch("/api/health").then((r) => r.json()).then((d) => {
+  if (d.version) $("version").textContent = d.version;
+  if (!d.canBrowse) {
+    // No dialog on this machine; pasting a path is the only way in.
+    $("browse").style.display = "none";
+    $("browse-big").style.display = "none";
+    $("path").placeholder = "paste a path to a folder of .sch files";
+  }
+  if (d.start) { $("path").value = d.start; scan(); }
+});
+</script>
+</body>
+</html>

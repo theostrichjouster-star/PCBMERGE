@@ -8,6 +8,9 @@ schematic and the board consistent enough for EAGLE to open them as a pair.
 A design may be instantiated more than once.  Each copy is an independent
 instance with its own numbered prefix, so parts and design-local nets increment
 together while shared rails still collapse into one net.
+
+Every design lands on one schematic sheet.  Multi-sheet output was tried and
+withdrawn: EAGLE 9.6.2 would not reliably open it.
 """
 
 from __future__ import annotations
@@ -16,7 +19,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import layout, pruning
+from . import kicad, layout, pruning
 from .eagle import (
     EagleDoc, EagleError, bbox, clone, content_hash, fmt, strip_urns, tidy,
     translate, unique_name,
@@ -56,6 +59,7 @@ class Design:
     class_map: dict[str, str] = field(default_factory=dict)
     dropped_parts: set[str] = field(default_factory=set)
     dropped_nets: set[str] = field(default_factory=set)
+    notes: list[str] = field(default_factory=list)   # e.g. how it was converted
 
     @property
     def name(self) -> str:
@@ -85,6 +89,7 @@ class MergeReport:
     dropped_urns: int = 0
     dropped_frames: int = 0
     dropped_parts: int = 0
+    converted: list[str] = field(default_factory=list)
     sheet_extent: tuple[float, float, float, float] | None = None
     outline: tuple[float, float] | None = None
     placements: list[layout.Placement] = field(default_factory=list)
@@ -95,12 +100,26 @@ class MergeReport:
     brd_path: Path | None = None
 
 
-def load_designs(instances: list[InstanceSpec]) -> list[Design]:
-    """Load each instance, parsing every source file only once."""
-    cache: dict[str, EagleDoc] = {}
+def load_designs(instances: list[InstanceSpec],
+                 cache: dict[str, EagleDoc] | None = None,
+                 notes: list[str] | None = None) -> list[Design]:
+    """Load each instance, parsing every source file only once.
+
+    KiCad designs are converted here rather than anywhere later, so the rest of
+    the engine only ever sees EAGLE documents.
+
+    Pass a `cache` to keep parsed documents between calls.  A long-running
+    caller re-analysing the same designs after every edit would otherwise
+    re-read several megabytes each time.
+    """
+    if cache is None:
+        cache = {}
+
+    def stamp(path: Path) -> str:
+        return f"{path}|{path.stat().st_mtime_ns}"
 
     def get(path: Path, kind: str) -> EagleDoc:
-        key = str(path)
+        key = stamp(path)
         doc = cache.get(key)
         if doc is None:
             doc = EagleDoc.load(path)
@@ -109,11 +128,30 @@ def load_designs(instances: list[InstanceSpec]) -> list[Design]:
             cache[key] = doc
         return doc
 
+    def converted(spec: InstanceSpec, told: list[str]) -> tuple[EagleDoc, EagleDoc]:
+        board = spec.brd_path if spec.brd_path is not None else spec.sch_path
+        stem = kicad.design_stem(board)
+        key = f"kicad|{stamp(board)}"
+        pair = cache.get(key)
+        if pair is None:
+            result = kicad.convert(stem)
+            pair = (result.schematic, result.board, result.notes)
+            cache[key] = pair
+        told.extend(pair[2])
+        if notes is not None:
+            notes.extend(n for n in pair[2] if n not in notes)
+        return pair[0], pair[1]
+
     designs: list[Design] = []
     for spec in instances:
-        sch = get(spec.sch_path, "sch")
-        brd = get(spec.brd_path, "brd") if spec.brd_path is not None else None
-        designs.append(Design(spec=spec, sch=sch, brd=brd))
+        told: list[str] = []
+        if kicad.is_kicad(spec.sch_path) or (
+                spec.brd_path is not None and kicad.is_kicad(spec.brd_path)):
+            sch, brd = converted(spec, told)
+        else:
+            sch = get(spec.sch_path, "sch")
+            brd = get(spec.brd_path, "brd") if spec.brd_path is not None else None
+        designs.append(Design(spec=spec, sch=sch, brd=brd, notes=told))
     return designs
 
 
@@ -145,6 +183,9 @@ class Merger:
     def prepare(self) -> None:
         for design in self.designs:
             self.report.copies[design.source] = self.report.copies.get(design.source, 0) + 1
+            for note in design.notes:
+                if note not in self.report.converted:
+                    self.report.converted.append(note)
         self._apply_drops()
         self._merge_libraries()
         self._map_parts()
@@ -163,7 +204,7 @@ class Merger:
             if design in by_name:
                 by_name[design].dropped_parts |= names
 
-        if self._designs_per_sheet() > 1 and len(self.designs) > 1:
+        if len(self.designs) > 1:
             for design in self.designs:
                 frames = self._frame_parts(design)
                 design.dropped_parts |= frames
@@ -267,19 +308,10 @@ class Merger:
             self.report.joined_nets.append(entry)
 
     # -- schematic ----------------------------------------------------------
-    def _designs_per_sheet(self) -> int:
-        """How many designs share a page, given the chosen sheet layout."""
-        if self.plan.sheet_layout == "single":
-            return len(self.designs)
-        if self.plan.sheet_layout == "packed":
-            return max(1, self.plan.sheets_per_page)
-        return 1
-
     def build_schematic(self) -> EagleDoc:
         base = self.designs[0].sch
-        per_sheet = self._designs_per_sheet()
-        packed = per_sheet > 1 and len(self.designs) > 1
-        tiles = self._sheet_tiles(per_sheet) if packed else {}
+        shared = len(self.designs) > 1
+        tiles = self._sheet_tiles() if shared else {}
 
         root = ET.Element("eagle", {"version": base.version})
         root.text = "\n"
@@ -318,43 +350,24 @@ class Merger:
                 parts.append(node)
                 self.report.parts += 1
 
-        if packed:
-            pages = self._packed_sheets(tiles)
-        else:
-            pages = []
-            for design in self.designs:
-                for index, sheet in enumerate(design.sch.sheets()):
-                    pages.append(self._build_sheet(design, sheet, index))
-
-        for page in pages:
-            sheets_node.append(page)
-            self.report.sheets += 1
+        sheets_node.append(self._one_sheet(tiles))
+        self.report.sheets = 1
 
         doc = EagleDoc(path=Path("merged.sch"), tree=ET.ElementTree(root), kind="sch")
         self.report.dropped_urns += strip_urns(root)
         tidy(root)
         return doc
 
-    def _build_sheet(self, design: Design, sheet: ET.Element, index: int,
-                     offset: tuple[float, float] = (0.0, 0.0)) -> ET.Element:
-        node = ET.Element("sheet")
-        node.text = "\n"
-        node.tail = "\n"
-        label = design.name if index == 0 else f"{design.name} (sheet {index + 1})"
-        description = ET.SubElement(node, "description")
-        description.text = label
-        description.tail = "\n"
-
-        body = self._sheet_body(design, sheet, offset)
-        for child_node in body:
-            node.append(child_node)
-        return node
-
     def _sheet_body(self, design: Design, sheet: ET.Element,
                     offset: tuple[float, float]) -> list[ET.Element]:
-        """The plain / instances / busses / nets of one design's sheet."""
+        """The plain / instances / busses / nets of one design's sheet.
+
+        Only the containers EAGLE expects on a sheet, and only ones the source
+        actually has.  An empty <moduleinsts/> here, which no hand-drawn file
+        carries, was enough to stop EAGLE opening the result.
+        """
         out: list[ET.Element] = []
-        for tag in ("plain", "moduleinsts", "instances", "busses"):
+        for tag in ("plain", "instances", "busses"):
             source = sheet.find(tag)
             copy = clone(source) if source is not None else ET.Element(tag)
             if tag == "instances":
@@ -406,15 +419,15 @@ class Merger:
                 pinref.set("part", design.part_map.get(part, part))
 
     # -- schematic packing --------------------------------------------------
-    def _sheet_tiles(self, per_sheet: int) -> dict[str, tuple[int, float, float]]:
-        """Where each design's drawing goes when several share a sheet."""
+    def _sheet_tiles(self) -> dict[str, tuple[float, float]]:
+        """Where each design's drawing goes on the shared sheet."""
         sizes: list[tuple[str, float, float]] = []
         for design in self.designs:
             box = self._sheet_extent(design)
             # Leave room above each block for its caption.
             sizes.append((design.name, box[2] - box[0],
                           box[3] - box[1] + CAPTION_GAP + float(CAPTION_SIZE)))
-        return layout.sheet_tiles(sizes, per_sheet)
+        return layout.sheet_tiles(sizes)
 
     def _sheet_extent(self, design: Design) -> tuple[float, float, float, float]:
         """Bounds of a design's schematic, ignoring its page border."""
@@ -440,59 +453,62 @@ class Merger:
                 out.add(part.get("name", ""))
         return out
 
-    def _packed_sheets(self, tiles: dict[str, tuple[int, float, float]]) -> list[ET.Element]:
-        """Build sheets that hold more than one design each."""
-        pages: dict[int, ET.Element] = {}
-        labels: dict[int, list[str]] = {}
-        # Per page, the net and bus elements already placed, keyed by name.
-        named: dict[int, dict[tuple[str, str], ET.Element]] = {}
+    def _one_sheet(self, tiles: dict[str, tuple[float, float]]) -> ET.Element:
+        """Build the single sheet that carries every design.
+
+        Each design's drawing is translated to its tile and its blocks are
+        captioned, so one page stays navigable.  Nets of the same name fold
+        together, because two elements named GND on one sheet is not a form
+        EAGLE accepts.
+        """
+        page = ET.Element("sheet")
+        page.text = "\n"
+        page.tail = "\n"
+        description = ET.SubElement(page, "description")
+        description.tail = "\n"
+        for tag in ("plain", "instances", "busses", "nets"):
+            node = ET.SubElement(page, tag)
+            node.text = "\n"
+            node.tail = "\n"
+
+        labels: list[str] = []
+        named: dict[tuple[str, str], ET.Element] = {}
 
         for design in self.designs:
-            sheet_index, tile_x, tile_y = tiles.get(design.name, (0, 0.0, 0.0))
             box = self._sheet_extent(design)
-            offset = (tile_x - box[0], tile_y - box[1])
-            height = box[3] - box[1]
-
-            page = pages.get(sheet_index)
-            if page is None:
-                page = ET.Element("sheet")
-                page.text = "\n"
-                page.tail = "\n"
-                description = ET.SubElement(page, "description")
-                description.tail = "\n"
-                for tag in ("plain", "instances", "busses", "nets"):
-                    node = ET.SubElement(page, tag)
-                    node.text = "\n"
-                    node.tail = "\n"
-                pages[sheet_index] = page
-                labels[sheet_index] = []
-            labels[sheet_index].append(design.name)
-            page.find("plain").append(
-                self._caption(design.name, tile_x, tile_y + height + CAPTION_GAP))
+            if tiles:
+                tile_x, tile_y = tiles.get(design.name, (0.0, 0.0))
+                offset = (tile_x - box[0], tile_y - box[1])
+            else:
+                # A lone design has nothing to make room for, so it keeps the
+                # coordinates it was drawn at and looks exactly as it did.
+                tile_x, tile_y = box[0], box[1]
+                offset = (0.0, 0.0)
+            labels.append(design.name)
+            if tiles:
+                page.find("plain").append(self._caption(
+                    design.name, tile_x, tile_y + (box[3] - box[1]) + CAPTION_GAP))
 
             for source_sheet in design.sch.sheets():
-                body = self._sheet_body(design, source_sheet, offset)
-                for part in body:
+                for part in self._sheet_body(design, source_sheet, offset):
                     target = page.find(part.tag)
                     if target is None:
                         continue
                     if part.tag in ("nets", "busses"):
-                        _absorb_named(target, part, named.setdefault(sheet_index, {}))
+                        _absorb_named(target, part, named)
                     else:
                         for node in list(part):
                             target.append(node)
 
-        for index, page in pages.items():
-            page.find("description").text = ", ".join(labels[index])
-            extent = bbox(page) or (0.0, 0.0, 0.0, 0.0)
-            self.report.sheet_extent = extent
-            width, height = extent[2] - extent[0], extent[3] - extent[1]
-            if max(width, height) > UNWIELDY_SHEET:
-                self.report.warnings.append(
-                    f"sheet is {width:.0f} x {height:.0f} mm, which is awkward to "
-                    f"navigate and to print; consider --sheet-layout packed with "
-                    f"--sheets-per-page")
-        return [pages[i] for i in sorted(pages)]
+        description.text = ", ".join(labels)
+        extent = bbox(page) or (0.0, 0.0, 0.0, 0.0)
+        self.report.sheet_extent = extent
+        width, height = extent[2] - extent[0], extent[3] - extent[1]
+        if max(width, height) > UNWIELDY_SHEET:
+            self.report.warnings.append(
+                f"the schematic sheet is {width:.0f} x {height:.0f} mm, which is "
+                f"awkward to navigate and to print; merge fewer designs at once")
+        return page
 
     def _caption(self, text: str, x: float, y: float) -> ET.Element:
         """A name above a block, so one crowded sheet stays navigable."""
@@ -503,6 +519,38 @@ class Merger:
         node.text = text
         node.tail = "\n"
         return node
+
+    # -- preview ------------------------------------------------------------
+    def preview(self) -> dict:
+        """Where the boards would land, and what would still need routing.
+
+        Runs the same placement the board build runs, but stops before any
+        XML is produced, so a caller can show the arrangement and let someone
+        change their mind cheaply.
+        """
+        boards = [d for d in self.designs if d.brd is not None]
+        self.report.outline = layout.parse_outline(self.plan.outline)
+        if not boards:
+            return {"outline": self.report.outline, "placements": [], "airwires": []}
+
+        placements = self._place(boards)
+        offsets = {p.design: p for p in placements}
+
+        points: dict[str, list[dict]] = {}
+        for design in boards:
+            place = offsets[design.name]
+            for net, (x, y) in self._net_centroids(design).items():
+                points.setdefault(net, []).append(
+                    {"design": design.name, "x": x + place.dx, "y": y + place.dy})
+
+        airwires = [{"net": net, "points": spots}
+                    for net, spots in points.items() if len(spots) > 1]
+        airwires.sort(key=lambda a: -len(a["points"]))
+        return {
+            "outline": self.report.outline,
+            "placements": placements,
+            "airwires": airwires,
+        }
 
     # -- board --------------------------------------------------------------
     def build_board(self) -> EagleDoc | None:

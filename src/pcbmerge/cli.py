@@ -6,8 +6,8 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import layout, linking, prompt, pruning
-from .eagle import EagleDoc, EagleError
+from . import kicad, layout, linking, prompt, pruning
+from .eagle import EagleDoc, EagleError, design_stem, with_ext
 from .libraries import LibraryMerger
 from .merge import build_resolver, load_designs, merge
 from .nets import Action, Kind, NetResolver
@@ -49,7 +49,8 @@ def collect_specs(inputs: list[str], prefixes: list[str] | None = None,
 
         path = Path(raw)
         if path.is_dir():
-            found = sorted({p.with_suffix("") for p in path.glob("*.sch")})
+            found = sorted({design_stem(p) for p in path.glob("*.sch")}
+                           | set(kicad.find_stems(path)))
             if not found:
                 raise EagleError(f"{path}: no .sch files in this directory")
             for stem in found:
@@ -58,9 +59,9 @@ def collect_specs(inputs: list[str], prefixes: list[str] | None = None,
                 wanted[stem] = count
             continue
 
-        stem = path.with_suffix("") if path.suffix in (".sch", ".brd") else path
-        if not stem.with_suffix(".sch").exists():
-            raise EagleError(f"{stem.with_suffix('.sch')}: not found")
+        stem = design_stem(path)
+        if not _design_exists(stem):
+            raise EagleError(f"{with_ext(stem, '.sch')}: not found")
         if stem not in stems:
             stems.append(stem)
         wanted[stem] = count
@@ -87,12 +88,27 @@ def collect_specs(inputs: list[str], prefixes: list[str] | None = None,
             except ValueError as exc:
                 raise EagleError(f"--count {count_args[index]!r} is not a number") from exc
 
-        brd = stem.with_suffix(".brd")
+        sch, brd = design_files(stem)
         specs.append(DesignSpec(
-            name=name, prefix=prefix, sch=str(stem.with_suffix(".sch")),
-            brd=str(brd) if brd.exists() else None, count=count,
+            name=name, prefix=prefix, sch=str(sch),
+            brd=str(brd) if brd else None, count=count,
         ))
     return specs
+
+
+def _design_exists(stem: Path) -> bool:
+    return any(with_ext(stem, ext).exists()
+               for ext in (".sch", kicad.PCB_SUFFIX))
+
+
+def design_files(stem: Path) -> tuple[Path, Path | None]:
+    """The schematic and board halves of a design, whichever tool drew it."""
+    board = with_ext(stem, kicad.PCB_SUFFIX)
+    if board.exists():
+        drawing = with_ext(stem, kicad.SCH_SUFFIX)
+        return (drawing if drawing.exists() else board), board
+    board = with_ext(stem, ".brd")
+    return with_ext(stem, ".sch"), (board if board.exists() else None)
 
 
 def _resolve(specs: list[DesignSpec], default: Action, replica: Action):
@@ -204,7 +220,6 @@ def cmd_plan(args: argparse.Namespace) -> int:
     plan = plan_from_resolver(
         resolver, specs, output=args.output, title=args.title or args.output,
         drops=drops, outline=args.outline, layout=args.layout, optimize=args.optimize, gap=args.gap, columns=args.columns,
-        sheet_layout=args.sheet_layout, sheets_per_page=args.sheets_per_page,
     )
     path = plan.save(args.plan_out)
     pending = len([g for g in resolver.open_questions() if g.decided_by == "auto"])
@@ -307,8 +322,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
             output=args.output or "merged", title=args.title or args.output or "merged",
             designs=specs, drops=list(args.drop or []),
             layout=args.layout, optimize=args.optimize, outline=args.outline,
-            gap=args.gap, columns=args.columns, sheet_layout=args.sheet_layout,
-            sheets_per_page=args.sheets_per_page,
+            gap=args.gap, columns=args.columns,
         )
 
     if not specs:
@@ -359,8 +373,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
         plan_from_resolver(
             resolver, specs, output=plan.output, title=plan.title,
             drops=plan.drops, outline=plan.outline, layout=plan.layout, optimize=plan.optimize, gap=plan.gap,
-            columns=plan.columns, sheet_layout=plan.sheet_layout,
-            sheets_per_page=plan.sheets_per_page,
+            columns=plan.columns,
         ).save(args.save_plan)
         print(f"Decisions saved to {args.save_plan}")
 
@@ -433,6 +446,11 @@ def _print_report(report, b: str, d: str, o: str) -> None:
             print(f"  {place.design:<44} {place.width:7.2f} x {place.height:7.2f} mm  "
                   f"at {place.x:8.2f}, {place.y:8.2f}")
 
+    if report.converted:
+        print(f"\n{b}Converted from KiCad{o}")
+        for note in report.converted:
+            print(f"  {note}")
+
     if report.warnings:
         print(f"\n{b}Warnings{o}")
         for warning in report.warnings:
@@ -447,6 +465,19 @@ def _print_report(report, b: str, d: str, o: str) -> None:
           f"between the sub-boards.{o}")
 
 
+def cmd_web(args: argparse.Namespace) -> int:
+    """Open the visual front end in a browser."""
+    from . import web
+
+    start = ""
+    if args.inputs:
+        first = Path(args.inputs[0])
+        start = str(first if first.is_dir() else first.parent)
+    web.serve(port=args.port, open_browser=not args.no_browser,
+              verbose=args.verbose, start=start)
+    return 0
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     """Verify a .sch/.brd pair is internally consistent.
 
@@ -458,9 +489,9 @@ def cmd_check(args: argparse.Namespace) -> int:
     b, d, o = _color(not args.no_color)
     stem = Path(args.design)
     if stem.suffix in (".sch", ".brd"):
-        stem = stem.with_suffix("")
-    sch = EagleDoc.load(stem.with_suffix(".sch"))
-    brd_path = stem.with_suffix(".brd")
+        stem = design_stem(stem)
+    sch = EagleDoc.load(with_ext(stem, ".sch"))
+    brd_path = with_ext(stem, ".brd")
 
     problems: list[str] = []
     notes: list[str] = []
@@ -580,12 +611,6 @@ def build_parser() -> argparse.ArgumentParser:
                          help="millimetres between tiled boards (default: 5)")
         sub.add_argument("--columns", type=int, default=0,
                          help="force a column count for the grid layout")
-        sub.add_argument("--sheet-layout", choices=("per-design", "packed", "single"),
-                         default="per-design",
-                         help="one sheet per design (default), several per sheet, "
-                              "or every design on one sheet")
-        sub.add_argument("--sheets-per-page", type=int, default=1,
-                         help="designs per sheet when --sheet-layout packed")
 
     def add_policy(sub):
         sub.add_argument("--default", choices=("join", "split"), default="split",
@@ -650,6 +675,17 @@ def build_parser() -> argparse.ArgumentParser:
     parts.add_argument("--all", action="store_true",
                        help="show every kind, not just the top 30")
     parts.set_defaults(func=cmd_parts)
+
+    site = subparsers.add_parser(
+        "web", help="open a visual front end in your browser")
+    site.add_argument("inputs", nargs="*",
+                      help="folder to open on start (optional)")
+    site.add_argument("--port", type=int, default=8765)
+    site.add_argument("--no-browser", action="store_true",
+                      help="do not open a browser window")
+    site.add_argument("-v", "--verbose", action="store_true",
+                      help="log every request")
+    site.set_defaults(func=cmd_web)
 
     checker = subparsers.add_parser("check", help="verify a .sch/.brd pair is consistent")
     checker.add_argument("design", help="a .sch, .brd, or shared stem")

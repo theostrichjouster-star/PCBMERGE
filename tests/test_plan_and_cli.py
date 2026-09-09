@@ -219,11 +219,16 @@ def test_copy_counts_survive_a_plan_round_trip(designs, tmp_path):
 
 
 def test_layout_settings_survive_a_plan_round_trip():
-    plan = MergePlan(layout="pack", optimize="airwire", gap=2.5,
-                     sheet_layout="packed", sheets_per_page=4)
+    plan = MergePlan(layout="pack", optimize="airwire", gap=2.5)
     again = MergePlan.from_json(plan.to_json())
     assert (again.layout, again.optimize, again.gap) == ("pack", "airwire", 2.5)
-    assert (again.sheet_layout, again.sheets_per_page) == ("packed", 4)
+
+
+def test_a_plan_naming_the_old_sheet_option_still_loads():
+    """Multi-sheet output was withdrawn; old plans must not fail to open."""
+    plan = MergePlan.from_json(
+        '{"sheet_layout": "packed", "sheets_per_page": 4, "layout": "pack"}')
+    assert plan.layout == "pack"
 
 
 def test_cli_rejects_a_link_to_a_net_that_does_not_exist(designs, tmp_path, capsys):
@@ -242,18 +247,9 @@ def test_cli_link_joins_differently_named_nets(designs, tmp_path):
     assert "TIED" in names
 
 
-def test_cli_packs_several_designs_onto_one_sheet(designs, tmp_path):
-    code = main(["--no-color", "merge", str(designs), "--out-dir", str(tmp_path / "out"),
-                 "-o", "combo", "--yes", "--sheet-layout", "packed",
-                 "--sheets-per-page", "2"])
-    assert code == 0
-    sch = EagleDoc.load(tmp_path / "out" / "combo.sch")
-    assert len(sch.sheets()) == 1, "both designs share one sheet"
-
-
-def test_a_packed_sheet_keeps_its_designs_apart(designs, tmp_path):
+def test_the_sheet_keeps_its_designs_apart(designs, tmp_path):
     main(["--no-color", "merge", str(designs), "--out-dir", str(tmp_path / "out"),
-          "-o", "combo", "--yes", "--sheet-layout", "packed", "--sheets-per-page", "2"])
+          "-o", "combo", "--yes"])
     sch = EagleDoc.load(tmp_path / "out" / "combo.sch")
     boxes: dict[str, list[float]] = {}
     for instance in sch.section.iterfind("sheets/sheet/instances/instance"):

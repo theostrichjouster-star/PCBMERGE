@@ -9,6 +9,8 @@ you route.
 
 | Module | Responsibility |
 | --- | --- |
+| `sexp.py` | Read the S-expressions KiCad writes. |
+| `kicad.py` | Convert a KiCad design into an EAGLE pair on the way in. |
 | `eagle.py` | Load, save and transform EAGLE XML. Coordinate translation, content hashing, name sanitising. |
 | `libraries.py` | Merge library sets, renaming items that clash by name but differ in content. |
 | `nets.py` | Classify net names and decide join or split. |
@@ -18,7 +20,39 @@ you route.
 | `plan.py` | Serialise every decision to JSON so a merge is replayable. |
 | `prompt.py` | Ask about copies, replicas, contested nets and links. |
 | `merge.py` | Apply the maps and build the two output documents. |
-| `cli.py` | `inspect`, `plan`, `merge`, `check`. |
+| `cli.py` | `inspect`, `parts`, `plan`, `merge`, `check`, `web`. |
+| `web.py` | A loopback HTTP server exposing the engine to the browser. |
+| `static/app.html` | The whole front end: one file, no dependencies. |
+
+## Reading KiCad
+
+Conversion happens in `load_designs` and nowhere else, so the whole engine only ever
+sees `EagleDoc` objects. Nothing downstream branches on which tool drew a design,
+which is what keeps one format from leaking into the merge logic.
+
+The board is the source. A `.kicad_pcb` holds the netlist, the placement, the copper
+and the outline; the schematic is rebuilt from it as one box per part with one pin
+per pad, connections carried on labels. That guarantees the pair is consistent,
+which converting two files independently would not.
+
+Three things have to be translated rather than copied:
+
+- **The Y axis.** KiCad counts down, EAGLE counts up, so every Y is negated.
+  Rotations therefore change sign, and a footprint on the back is mirrored.
+- **Arcs.** KiCad stores three points, EAGLE stores an included angle, so the angle
+  is computed from the inscribed angle at the middle point.
+- **Net names.** `/Sheet/VCC_3V3` keeps only its leaf or no rail would match an
+  EAGLE design's; `Net-(U1-Pad2)` becomes `N$1` so the resolver keeps it apart the
+  same way it keeps EAGLE's anonymous nets apart.
+
+### Filenames with dots
+
+`Path.with_suffix` and `Path.stem` both cut at the last dot, so a board called
+`XIAO ESP32S3_V1.5.kicad_pcb` would be looked for as `XIAO ESP32S3_V1.kicad_pcb`
+and its design would be named `XIAO_ESP32S3_V1`. `design_stem()` strips only a
+known extension and `with_ext()` appends rather than replaces. This was already
+wrong for EAGLE files with a version in the name; KiCad's example is simply what
+exposed it.
 
 ## Designs and instances
 
@@ -204,27 +238,35 @@ its pads, translated by each board's placement. Element origins substitute for e
 pad positions: enough to rank arrangements, and it avoids resolving package pad
 geometry through rotation.
 
-### Schematic sheets
+### The schematic sheet
 
-Per-design sheets need no translation at all, which is why that is the default: the
-pages keep their original coordinates and look exactly as drawn.
+Everything goes on one sheet. Each design's content is translated to a tile after
+measuring its extent with page borders excluded, and the sheet is shelf-packed
+with a wider aspect target than the board uses, because a drawing is read on
+screen rather than cut from a panel.
 
-`packed` and `single` share one code path; `single` is just a page size equal to the
-instance count. Each design's content is translated to a tile after measuring its
-extent with page borders excluded, and each page is shelf-packed on its own so a big
-drawing on page two costs page one nothing. Sheets use a wider aspect target than
-boards, because a drawing is read on screen rather than cut from a panel.
+Designs sharing a sheet have their frame parts dropped, since several overlapping
+A4 borders are only noise, and each gains a caption on layer 97 placed in a gap
+the tile reserves above itself. A design merged on its own is not translated at
+all, so it keeps the coordinates it was drawn at.
 
-Designs sharing a sheet have their frame parts dropped, since several overlapping A4
-borders are only noise. Dropped parts are skipped in both the parts list and the
-instance list. Each block gains a caption on layer 97, placed in a gap the tile
-reserves above itself, so one crowded page stays navigable.
+Sharing a sheet forces net folding. EAGLE writes one `<net>` per name per sheet
+with several `<segment>` children, so two elements named `GND` on one page is not
+a form it accepts. `_absorb_named()` moves segments into the first element of that
+name instead.
 
-Sharing a sheet also forces net folding. EAGLE writes one `<net>` per name per sheet
-with several `<segment>` children, so two elements named `GND` on one page is not a
-form it accepts. `_absorb_named()` moves segments into the first element of that name
-instead. Per-design sheets never hit this, because each sheet holds one design's copy
-of a net; it only appears once designs meet on a page.
+### Why there is only one sheet
+
+A per-design sheet mode existed and was removed. Its sheets carried an empty
+`<moduleinsts/>` container, produced because the builder created every child tag
+whether or not the source had one. No hand-drawn EAGLE file carries that element,
+and 9.6.2 would not reliably open the result. The single-sheet builder never hit
+it, because it only copied across the tags its page already had.
+
+`_sheet_body()` now emits only `plain`, `instances`, `busses` and `nets`, and a
+test asserts a merged sheet's children match what a drawn sheet contains. The
+lesson generalises: writing a structurally valid element that real files never
+contain is still a way to produce a file the tool will not open.
 
 ## Why joined nets stay unrouted
 
@@ -234,11 +276,57 @@ That is the intended output: the airwires are precisely the list of connections 
 engineer still has to make, and inventing a route across a board boundary would be
 worse than showing the work that remains.
 
+## The front end
+
+`web.py` is a thin layer. It owns no merge logic of its own: every request builds
+the same `Merger` the command line builds, and the page is redrawn from whatever
+that produces. The alternative, a second implementation of the rules in
+JavaScript, would drift from the engine within a week.
+
+Four endpoints do the work. `browse` opens a folder dialog. `scan` lists the
+designs in a folder. `analyze` rebuilds everything from the decisions the page is
+holding and returns what to draw. `merge` is the only one that touches the disk.
+
+The picker is the operating system's, not the browser's, because a page is never
+told where a chosen folder actually lives. It runs as a subprocess rather than in
+the handler: Tk dislikes worker threads, and a modal dialog on a request thread
+would hold the server for as long as someone left it open. Cancelling and timing
+out both come back as `{"cancelled": true}` rather than an error, since neither is
+a failure. `can_browse()` reports whether tkinter exists at all, and the page hides
+the button when it does not.
+
+`analyze` is called after every edit, so it has to be cheap. Two things make it
+so. Parsed documents live in a module-level cache keyed by path and mtime, since
+re-reading seven megabytes of XML per keystroke would make the page feel broken.
+And `Merger.preview()` runs the real placement but stops before any XML is
+produced, so looking costs a fraction of committing.
+
+The page holds all the state and sends it whole with each request, which keeps
+the server stateless and means a reload cannot leave the two disagreeing. Requests
+carry a sequence number and stale replies are dropped, so a slow analyse cannot
+overwrite a newer one.
+
+The board picture is plain SVG built in JavaScript. Millimetres are y-up and
+screens are y-down, so points are transformed in code rather than with an SVG
+flip, which would mirror every label. Boards too small to hold their name are
+drawn without one: labelling regardless turns a crowded arrangement into a pile
+of overlapping text.
+
 ## Testing
 
 `tests/conftest.py` builds small synthetic EAGLE designs that clash deliberately:
 same part names, same library names with different pad geometry, and a net set
 covering every bucket. Those tests run in milliseconds and pin the behaviour.
+
+`tests/test_kicad.py` builds a small KiCad board inline rather than leaning on the
+sample, so the parser, the axis flip, the arc maths and the net renaming are each
+pinned on input small enough to read. It finishes by merging that board with two
+EAGLE designs, which is the thing the feature exists for.
+
+`tests/test_web.py` drives the API directly rather than through HTTP, which keeps
+it fast and keeps the assertions about behaviour rather than transport. It pins
+that analysing writes nothing, that the cache survives repeated calls but notices
+an edited file, and that what the page previews is what the merge writes.
 
 `tests/test_board_output.py` pins the things EAGLE checks and Python cannot: that
 the board's copper layers are switched on, that the two files do not share one
