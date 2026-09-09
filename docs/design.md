@@ -9,6 +9,8 @@ you route.
 
 | Module | Responsibility |
 | --- | --- |
+| `sexp.py` | Read the S-expressions KiCad writes. |
+| `kicad.py` | Convert a KiCad design into an EAGLE pair on the way in. |
 | `eagle.py` | Load, save and transform EAGLE XML. Coordinate translation, content hashing, name sanitising. |
 | `libraries.py` | Merge library sets, renaming items that clash by name but differ in content. |
 | `nets.py` | Classify net names and decide join or split. |
@@ -21,6 +23,36 @@ you route.
 | `cli.py` | `inspect`, `parts`, `plan`, `merge`, `check`, `web`. |
 | `web.py` | A loopback HTTP server exposing the engine to the browser. |
 | `static/app.html` | The whole front end: one file, no dependencies. |
+
+## Reading KiCad
+
+Conversion happens in `load_designs` and nowhere else, so the whole engine only ever
+sees `EagleDoc` objects. Nothing downstream branches on which tool drew a design,
+which is what keeps one format from leaking into the merge logic.
+
+The board is the source. A `.kicad_pcb` holds the netlist, the placement, the copper
+and the outline; the schematic is rebuilt from it as one box per part with one pin
+per pad, connections carried on labels. That guarantees the pair is consistent,
+which converting two files independently would not.
+
+Three things have to be translated rather than copied:
+
+- **The Y axis.** KiCad counts down, EAGLE counts up, so every Y is negated.
+  Rotations therefore change sign, and a footprint on the back is mirrored.
+- **Arcs.** KiCad stores three points, EAGLE stores an included angle, so the angle
+  is computed from the inscribed angle at the middle point.
+- **Net names.** `/Sheet/VCC_3V3` keeps only its leaf or no rail would match an
+  EAGLE design's; `Net-(U1-Pad2)` becomes `N$1` so the resolver keeps it apart the
+  same way it keeps EAGLE's anonymous nets apart.
+
+### Filenames with dots
+
+`Path.with_suffix` and `Path.stem` both cut at the last dot, so a board called
+`XIAO ESP32S3_V1.5.kicad_pcb` would be looked for as `XIAO ESP32S3_V1.kicad_pcb`
+and its design would be named `XIAO_ESP32S3_V1`. `design_stem()` strips only a
+known extension and `with_ext()` appends rather than replaces. This was already
+wrong for EAGLE files with a version in the name; KiCad's example is simply what
+exposed it.
 
 ## Designs and instances
 
@@ -285,6 +317,11 @@ of overlapping text.
 `tests/conftest.py` builds small synthetic EAGLE designs that clash deliberately:
 same part names, same library names with different pad geometry, and a net set
 covering every bucket. Those tests run in milliseconds and pin the behaviour.
+
+`tests/test_kicad.py` builds a small KiCad board inline rather than leaning on the
+sample, so the parser, the axis flip, the arc maths and the net renaming are each
+pinned on input small enough to read. It finishes by merging that board with two
+EAGLE designs, which is the thing the feature exists for.
 
 `tests/test_web.py` drives the API directly rather than through HTTP, which keeps
 it fast and keeps the assertions about behaviour rather than transport. It pins

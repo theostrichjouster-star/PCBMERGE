@@ -1,7 +1,8 @@
 # pcbmerge
 
-Combine several Autodesk EAGLE designs into a single schematic and board, resolving
-net names automatically where the answer is certain and asking where it is not.
+Combine several PCB designs into a single schematic and board, resolving net names
+automatically where the answer is certain and asking where it is not. Reads EAGLE
+(`.sch` / `.brd`) and KiCad (`.kicad_pcb`), and writes EAGLE.
 
 Point it at a folder of `.sch`/`.brd` pairs and it produces one merged pair that
 EAGLE will open: every part renamed apart, every library conflict preserved, the
@@ -59,6 +60,40 @@ The server binds to the loopback address and reads and writes files as you, whic
 is right for a tool you start yourself and wrong for anything exposed to a
 network. It needs no internet connection and loads nothing from a CDN.
 
+## KiCad designs
+
+A `.kicad_pcb` can go into a merge beside EAGLE files, with no flag and nothing to
+convert by hand. Point the tool at a folder holding both and it works out which is
+which.
+
+```bash
+pcbmerge merge examples/adafruit -o combo --out-dir out --yes
+```
+
+The board is the source of truth. A KiCad board carries the whole netlist, every
+footprint with its pads and their nets, the copper and the outline, which is
+everything a merge needs. Footprints become packages, nets become signals, tracks
+and vias and pours come across, and the outline lands on the Dimension layer.
+
+Two conventions differ and both are handled. KiCad measures Y downwards where EAGLE
+measures it up, so every Y is negated and rotations change sign with it. Footprints
+on the back come across mirrored.
+
+Net names are normalised so they can match. A hierarchical KiCad name like
+`/Sheet One/VCC_3V3` becomes `VCC_3V3`, or no rail would ever line up with an EAGLE
+design's. Names KiCad invented, the `Net-(U1-Pad2)` form, become `N$1` and so are
+kept apart exactly as EAGLE's own anonymous nets are.
+
+**The schematic is drawn from the netlist**, not from the `.kicad_sch`. Each part
+becomes a box with one pin per pad, and connections are carried on net labels. It is
+not the drawing the engineer made and is not meant to be: it is a faithful, openable
+statement of the same connections, consistent with the board by construction. The
+merge says so in its report rather than leaving you to notice.
+
+Converting a KiCad schematic drawing faithfully is a separate and much larger job:
+symbols, wires, buses, hierarchical labels and sheet pins all have to be redrawn in
+EAGLE's model. The netlist route gives a correct merge today.
+
 ## The problem it solves
 
 Dropping two EAGLE designs into one file breaks in four separate ways at once.
@@ -71,6 +106,8 @@ Dropping two EAGLE designs into one file breaks in four separate ways at once.
 - **Net names mean different things.** `GND` in two designs is one node. `N$1` in
   two designs is two unrelated nodes. `VCC` might be either, and only you know.
 - **Boards sit on top of each other.** Every design is drawn near its own origin.
+- **Two tools, two file formats.** KiCad stores S-expressions and measures Y the
+  other way up.
 
 pcbmerge handles all four, and keeps the schematic and the board consistent with
 each other, which is what EAGLE requires before it will let you route anything.
@@ -517,7 +554,11 @@ pcbmerge check out/combo
 
 ## Limitations
 
-- EAGLE XML only (`.sch` / `.brd`). KiCad and Altium are not supported.
+- Writes EAGLE only. Reads EAGLE and KiCad; Altium is not supported.
+- A KiCad schematic's drawing is not converted. The schematic is rebuilt from the
+  board netlist as boxes with one pin per pad.
+- KiCad copper pours come across as their outline polygons, not as the filled shape
+  KiCad computed.
 - Design rules, autorouter settings and global attributes come from the first
   design; conflicts elsewhere are reported as warnings, not merged.
 - Buses are copied per sheet but never joined across designs.

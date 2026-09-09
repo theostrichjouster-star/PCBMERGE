@@ -6,8 +6,8 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import layout, linking, prompt, pruning
-from .eagle import EagleDoc, EagleError
+from . import kicad, layout, linking, prompt, pruning
+from .eagle import EagleDoc, EagleError, design_stem, with_ext
 from .libraries import LibraryMerger
 from .merge import build_resolver, load_designs, merge
 from .nets import Action, Kind, NetResolver
@@ -49,7 +49,8 @@ def collect_specs(inputs: list[str], prefixes: list[str] | None = None,
 
         path = Path(raw)
         if path.is_dir():
-            found = sorted({p.with_suffix("") for p in path.glob("*.sch")})
+            found = sorted({design_stem(p) for p in path.glob("*.sch")}
+                           | set(kicad.find_stems(path)))
             if not found:
                 raise EagleError(f"{path}: no .sch files in this directory")
             for stem in found:
@@ -58,9 +59,9 @@ def collect_specs(inputs: list[str], prefixes: list[str] | None = None,
                 wanted[stem] = count
             continue
 
-        stem = path.with_suffix("") if path.suffix in (".sch", ".brd") else path
-        if not stem.with_suffix(".sch").exists():
-            raise EagleError(f"{stem.with_suffix('.sch')}: not found")
+        stem = design_stem(path)
+        if not _design_exists(stem):
+            raise EagleError(f"{with_ext(stem, '.sch')}: not found")
         if stem not in stems:
             stems.append(stem)
         wanted[stem] = count
@@ -87,12 +88,27 @@ def collect_specs(inputs: list[str], prefixes: list[str] | None = None,
             except ValueError as exc:
                 raise EagleError(f"--count {count_args[index]!r} is not a number") from exc
 
-        brd = stem.with_suffix(".brd")
+        sch, brd = design_files(stem)
         specs.append(DesignSpec(
-            name=name, prefix=prefix, sch=str(stem.with_suffix(".sch")),
-            brd=str(brd) if brd.exists() else None, count=count,
+            name=name, prefix=prefix, sch=str(sch),
+            brd=str(brd) if brd else None, count=count,
         ))
     return specs
+
+
+def _design_exists(stem: Path) -> bool:
+    return any(with_ext(stem, ext).exists()
+               for ext in (".sch", kicad.PCB_SUFFIX))
+
+
+def design_files(stem: Path) -> tuple[Path, Path | None]:
+    """The schematic and board halves of a design, whichever tool drew it."""
+    board = with_ext(stem, kicad.PCB_SUFFIX)
+    if board.exists():
+        drawing = with_ext(stem, kicad.SCH_SUFFIX)
+        return (drawing if drawing.exists() else board), board
+    board = with_ext(stem, ".brd")
+    return with_ext(stem, ".sch"), (board if board.exists() else None)
 
 
 def _resolve(specs: list[DesignSpec], default: Action, replica: Action):
@@ -430,6 +446,11 @@ def _print_report(report, b: str, d: str, o: str) -> None:
             print(f"  {place.design:<44} {place.width:7.2f} x {place.height:7.2f} mm  "
                   f"at {place.x:8.2f}, {place.y:8.2f}")
 
+    if report.converted:
+        print(f"\n{b}Converted from KiCad{o}")
+        for note in report.converted:
+            print(f"  {note}")
+
     if report.warnings:
         print(f"\n{b}Warnings{o}")
         for warning in report.warnings:
@@ -468,9 +489,9 @@ def cmd_check(args: argparse.Namespace) -> int:
     b, d, o = _color(not args.no_color)
     stem = Path(args.design)
     if stem.suffix in (".sch", ".brd"):
-        stem = stem.with_suffix("")
-    sch = EagleDoc.load(stem.with_suffix(".sch"))
-    brd_path = stem.with_suffix(".brd")
+        stem = design_stem(stem)
+    sch = EagleDoc.load(with_ext(stem, ".sch"))
+    brd_path = with_ext(stem, ".brd")
 
     problems: list[str] = []
     notes: list[str] = []

@@ -1,4 +1,8 @@
-"""Integration tests against the real Adafruit designs in examples/."""
+"""Integration tests against the real designs in examples/adafruit.
+
+Eight were drawn in EAGLE and one in KiCad, which is the point: they merge
+together without the engine knowing the difference.
+"""
 
 from __future__ import annotations
 
@@ -26,24 +30,31 @@ def merged(samples, tmp_path_factory):
     return report, resolver, prefixes
 
 
-def test_all_eight_designs_merge(merged):
+def test_every_design_in_the_folder_merges(merged, samples):
     report, _, prefixes = merged
-    assert len(report.designs) == 8
+    expected = len(collect_specs([str(samples)]))
+    assert len(report.designs) == expected >= 8
     assert report.parts > 300
     assert report.sheets == 1
 
 
-def test_ground_joins_across_every_design(merged):
+def test_the_kicad_design_is_among_them(merged):
+    report, _, prefixes = merged
+    assert any("XIAO" in name for name in report.designs)
+    assert report.converted, "and the merge says it converted it"
+
+
+def test_ground_joins_across_every_design(merged, samples):
     report, resolver, prefixes = merged
     ground = resolver.group_for("GND")
-    assert ground.design_count == 8
+    assert ground.design_count == len(collect_specs([str(samples)]))
     assert ground.action is Action.JOIN
 
     brd = EagleDoc.load(report.brd_path)
     gnd = [s for s in brd.signals() if s.get("name") == "GND"]
     assert len(gnd) == 1
-    prefixes = {c.get("element").split("_")[0] for c in gnd[0].iterfind(".//contactref")}
-    assert len(prefixes) == 8, "GND gathers copper from all eight boards"
+    reached = {c.get("element").split("_")[0] for c in gnd[0].iterfind(".//contactref")}
+    assert len(reached) == len(report.designs), "GND gathers copper from every board"
 
 
 def test_the_i2c_bus_is_offered_as_a_question_not_assumed(merged):
@@ -92,7 +103,7 @@ def test_devicesets_point_at_symbols_and_packages_that_exist(merged):
                     assert device.get("package") in packages
 
 
-def test_reference_designators_are_unique_across_all_eight(merged):
+def test_reference_designators_are_unique_across_them_all(merged):
     report, _, prefixes = merged
     sch = EagleDoc.load(report.sch_path)
     names = [p.get("name") for p in sch.parts()]

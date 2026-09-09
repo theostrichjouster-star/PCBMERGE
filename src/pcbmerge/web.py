@@ -25,8 +25,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-from . import linking, pruning
-from .eagle import EagleDoc, EagleError
+from . import kicad, linking, pruning
+from .eagle import EagleDoc, EagleError, design_stem
 from .merge import Merger, build_resolver, load_designs, merge
 from .nets import Action, Kind
 from .plan import DesignSpec, MergePlan, apply_plan, default_prefix, design_name, expand
@@ -142,9 +142,10 @@ def scan(body: dict) -> dict:
         raise ValueError(f"{target} does not exist")
 
     folder = target if target.is_dir() else target.parent
-    stems = sorted({p.with_suffix("") for p in folder.glob("*.sch")})
+    stems = sorted({design_stem(p) for p in folder.glob("*.sch")}
+                   | set(kicad.find_stems(folder)))
     if not stems:
-        raise ValueError(f"no .sch files in {folder}")
+        raise ValueError(f"no EAGLE or KiCad designs in {folder}")
 
     designs: list[dict] = []
     taken: set[str] = set()
@@ -152,12 +153,14 @@ def scan(body: dict) -> dict:
         name = design_name(stem)
         prefix = default_prefix(name, taken)
         taken.add(prefix)
-        board = stem.with_suffix(".brd")
+        from .cli import design_files
+
+        drawing, board = design_files(stem)
         designs.append({
             "name": name,
             "prefix": prefix,
-            "sch": str(stem.with_suffix(".sch")),
-            "brd": str(board) if board.exists() else None,
+            "sch": str(drawing),
+            "brd": str(board) if board else None,
             "count": 1,
             "use": True,
         })
@@ -288,6 +291,7 @@ def analyze(body: dict) -> dict:
             "designs": len(specs),
         },
         "warnings": merger.report.warnings,
+        "converted": merger.report.converted,
     }
 
 

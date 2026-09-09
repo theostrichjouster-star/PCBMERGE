@@ -187,8 +187,13 @@ def expand(specs: list[DesignSpec]) -> list[InstanceSpec]:
 
 
 def design_name(path: Path) -> str:
-    """A short, readable identity for a design, taken from its filename."""
-    return sanitize_name(path.stem)
+    """A short, readable identity for a design, taken from its filename.
+
+    The path given is already stripped of its extension, so `.stem` must not be
+    used here: it would cut again at the last dot and turn `board_V1.5` into
+    `board_V1`.
+    """
+    return sanitize_name(Path(path).name)
 
 
 def default_prefix(name: str, taken: set[str]) -> str:

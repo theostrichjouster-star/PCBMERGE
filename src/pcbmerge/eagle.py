@@ -275,6 +275,34 @@ def unique_name(base: str, taken: set[str], sep: str = "$") -> str:
     return f"{base}{sep}{n}"
 
 
+# Every extension the tool treats as one half of a design.  Longest first, so
+# `.kicad_sch` is recognised before anything shorter could match inside it.
+DESIGN_SUFFIXES = (".kicad_sch", ".kicad_pcb", ".sch", ".brd")
+
+
+def design_stem(path: str | Path) -> Path:
+    """A design's path with its extension removed.
+
+    `Path.with_suffix("")` cannot be used for this: it strips from the last dot,
+    so a board called `XIAO ESP32S3_V1.5.kicad_pcb` would lose the `.5` and every
+    file beside it would then be looked for under the wrong name.
+    """
+    path = Path(path)
+    name = path.name
+    for suffix in DESIGN_SUFFIXES:
+        if name.lower().endswith(suffix):
+            return path.with_name(name[: -len(suffix)])
+    return path
+
+
+def with_ext(stem: str | Path, extension: str) -> Path:
+    """The path of one half of a design, named by adding an extension.
+
+    Appends rather than replaces, for the same reason `design_stem` exists.
+    """
+    return Path(f"{stem}{extension}")
+
+
 def iter_named(container: ET.Element | None) -> Iterator[ET.Element]:
     if container is None:
         return iter(())

@@ -19,7 +19,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import layout, pruning
+from . import kicad, layout, pruning
 from .eagle import (
     EagleDoc, EagleError, bbox, clone, content_hash, fmt, strip_urns, tidy,
     translate, unique_name,
@@ -59,6 +59,7 @@ class Design:
     class_map: dict[str, str] = field(default_factory=dict)
     dropped_parts: set[str] = field(default_factory=set)
     dropped_nets: set[str] = field(default_factory=set)
+    notes: list[str] = field(default_factory=list)   # e.g. how it was converted
 
     @property
     def name(self) -> str:
@@ -88,6 +89,7 @@ class MergeReport:
     dropped_urns: int = 0
     dropped_frames: int = 0
     dropped_parts: int = 0
+    converted: list[str] = field(default_factory=list)
     sheet_extent: tuple[float, float, float, float] | None = None
     outline: tuple[float, float] | None = None
     placements: list[layout.Placement] = field(default_factory=list)
@@ -99,18 +101,25 @@ class MergeReport:
 
 
 def load_designs(instances: list[InstanceSpec],
-                 cache: dict[str, EagleDoc] | None = None) -> list[Design]:
+                 cache: dict[str, EagleDoc] | None = None,
+                 notes: list[str] | None = None) -> list[Design]:
     """Load each instance, parsing every source file only once.
+
+    KiCad designs are converted here rather than anywhere later, so the rest of
+    the engine only ever sees EAGLE documents.
 
     Pass a `cache` to keep parsed documents between calls.  A long-running
     caller re-analysing the same designs after every edit would otherwise
-    re-read several megabytes of XML each time.
+    re-read several megabytes each time.
     """
     if cache is None:
         cache = {}
 
+    def stamp(path: Path) -> str:
+        return f"{path}|{path.stat().st_mtime_ns}"
+
     def get(path: Path, kind: str) -> EagleDoc:
-        key = f"{path}|{path.stat().st_mtime_ns}"
+        key = stamp(path)
         doc = cache.get(key)
         if doc is None:
             doc = EagleDoc.load(path)
@@ -119,11 +128,30 @@ def load_designs(instances: list[InstanceSpec],
             cache[key] = doc
         return doc
 
+    def converted(spec: InstanceSpec, told: list[str]) -> tuple[EagleDoc, EagleDoc]:
+        board = spec.brd_path if spec.brd_path is not None else spec.sch_path
+        stem = kicad.design_stem(board)
+        key = f"kicad|{stamp(board)}"
+        pair = cache.get(key)
+        if pair is None:
+            result = kicad.convert(stem)
+            pair = (result.schematic, result.board, result.notes)
+            cache[key] = pair
+        told.extend(pair[2])
+        if notes is not None:
+            notes.extend(n for n in pair[2] if n not in notes)
+        return pair[0], pair[1]
+
     designs: list[Design] = []
     for spec in instances:
-        sch = get(spec.sch_path, "sch")
-        brd = get(spec.brd_path, "brd") if spec.brd_path is not None else None
-        designs.append(Design(spec=spec, sch=sch, brd=brd))
+        told: list[str] = []
+        if kicad.is_kicad(spec.sch_path) or (
+                spec.brd_path is not None and kicad.is_kicad(spec.brd_path)):
+            sch, brd = converted(spec, told)
+        else:
+            sch = get(spec.sch_path, "sch")
+            brd = get(spec.brd_path, "brd") if spec.brd_path is not None else None
+        designs.append(Design(spec=spec, sch=sch, brd=brd, notes=told))
     return designs
 
 
@@ -155,6 +183,9 @@ class Merger:
     def prepare(self) -> None:
         for design in self.designs:
             self.report.copies[design.source] = self.report.copies.get(design.source, 0) + 1
+            for note in design.notes:
+                if note not in self.report.converted:
+                    self.report.converted.append(note)
         self._apply_drops()
         self._merge_libraries()
         self._map_parts()
