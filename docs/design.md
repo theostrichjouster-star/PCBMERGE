@@ -151,10 +151,22 @@ geometry through rotation.
 Per-design sheets need no translation at all, which is why that is the default: the
 pages keep their original coordinates and look exactly as drawn.
 
-Packed sheets translate each design's content to a tile, after measuring its extent
-with page borders excluded. Designs sharing a sheet have their frame parts dropped,
-since several overlapping A4 borders are just noise. Dropped parts are skipped in
-both the parts list and the instance list.
+`packed` and `single` share one code path; `single` is just a page size equal to the
+instance count. Each design's content is translated to a tile after measuring its
+extent with page borders excluded, and each page is shelf-packed on its own so a big
+drawing on page two costs page one nothing. Sheets use a wider aspect target than
+boards, because a drawing is read on screen rather than cut from a panel.
+
+Designs sharing a sheet have their frame parts dropped, since several overlapping A4
+borders are only noise. Dropped parts are skipped in both the parts list and the
+instance list. Each block gains a caption on layer 97, placed in a gap the tile
+reserves above itself, so one crowded page stays navigable.
+
+Sharing a sheet also forces net folding. EAGLE writes one `<net>` per name per sheet
+with several `<segment>` children, so two elements named `GND` on one page is not a
+form it accepts. `_absorb_named()` moves segments into the first element of that name
+instead. Per-design sheets never hit this, because each sheet holds one design's copy
+of a net; it only appears once designs meet on a page.
 
 ## Why joined nets stay unrouted
 

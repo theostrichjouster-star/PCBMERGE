@@ -136,37 +136,49 @@ def _grid(boards: list[Board], style: str, gap: float, columns: int,
     return placements
 
 
-def _shelf(boards: list[Board], gap: float, origin: tuple[float, float]) -> list[Placement]:
-    """Shelf packing: rows sized to their tallest board, no wasted uniform cell.
+def shelf_positions(sizes: list[tuple[float, float]], gap: float,
+                    aspect: float = 1.0) -> list[tuple[float, float, int, int]]:
+    """Pack rectangles into rows sized to their tallest member.
 
-    The shelf width targets a roughly square result, which is what fabricators
-    price best and what fits a panel.
+    Returns the bottom-left corner of each item plus its row and column, with
+    the first row at y = 0 and later rows below it.  The shelf width targets
+    the given width-to-height ratio: square for a panel, wider for a drawing
+    sheet that will be read on screen.
     """
-    total_area = sum(b.width * b.height for b in boards)
-    widest = max(b.width for b in boards)
-    target = max(widest, math.sqrt(total_area) * 1.15)
+    if not sizes:
+        return []
+    total_area = sum(w * h for w, h in sizes)
+    widest = max(w for w, _ in sizes)
+    target = max(widest, math.sqrt(total_area * aspect) * 1.15)
 
-    placements: list[Placement] = []
+    out: list[tuple[float, float, int, int]] = []
     cursor_x = 0.0
     shelf_y = 0.0
     shelf_height = 0.0
-    row = 0
-    column = 0
+    row = column = 0
 
-    for board in boards:
-        if cursor_x > 0 and cursor_x + board.width > target:
+    for width, height in sizes:
+        if cursor_x > 0 and cursor_x + width > target:
             shelf_y -= shelf_height + gap
             cursor_x = 0.0
             shelf_height = 0.0
             row += 1
             column = 0
-        x = origin[0] + cursor_x
-        y = origin[1] + shelf_y - board.height
+        out.append((cursor_x, shelf_y - height, row, column))
+        cursor_x += width + gap
+        shelf_height = max(shelf_height, height)
+        column += 1
+    return out
+
+
+def _shelf(boards: list[Board], gap: float, origin: tuple[float, float]) -> list[Placement]:
+    """Shelf packing for boards: no wasted uniform cell, roughly square."""
+    sizes = [(b.width, b.height) for b in boards]
+    placements: list[Placement] = []
+    for board, (px, py, row, column) in zip(boards, shelf_positions(sizes, gap)):
+        x, y = origin[0] + px, origin[1] + py
         placements.append(Placement(board.design, x - board.min_x, y - board.min_y,
                                     board.width, board.height, x, y, column, row))
-        cursor_x += board.width + gap
-        shelf_height = max(shelf_height, board.height)
-        column += 1
     return placements
 
 
@@ -317,21 +329,26 @@ def _stats(placements: list[Placement], boards: list[Board],
 # schematic sheets
 # --------------------------------------------------------------------------
 
-def sheet_tiles(sizes: list[tuple[str, float, float]], per_sheet: int,
-                gap: float = 20.0) -> dict[str, tuple[int, float, float]]:
-    """Assign designs to sheets and positions when packing several per sheet.
+# A drawing is read on screen, so a wider-than-tall page beats a square one.
+SHEET_ASPECT = 1.6
 
-    Returns design -> (sheet index, dx, dy).
+
+def sheet_tiles(sizes: list[tuple[str, float, float]], per_sheet: int,
+                gap: float = 25.4) -> dict[str, tuple[int, float, float]]:
+    """Assign designs to sheets and positions when several share a page.
+
+    Each page is packed independently, so a page of one big and three small
+    drawings does not pay for the big one four times over.
+
+    Returns design -> (sheet index, x, y of the drawing's bottom-left corner).
     """
     tiles: dict[str, tuple[int, float, float]] = {}
-    if per_sheet < 1:
-        per_sheet = 1
-    columns = max(1, math.ceil(math.sqrt(per_sheet)))
-    cell_w = max((w for _, w, _ in sizes), default=0.0) + gap
-    cell_h = max((h for _, _, h in sizes), default=0.0) + gap
+    per_sheet = max(1, per_sheet)
 
-    for index, (name, _, _) in enumerate(sizes):
-        sheet, slot = divmod(index, per_sheet)
-        column, row = slot % columns, slot // columns
-        tiles[name] = (sheet, column * cell_w, -row * cell_h)
+    for start in range(0, len(sizes), per_sheet):
+        page = sizes[start:start + per_sheet]
+        sheet = start // per_sheet
+        packed = shelf_positions([(w, h) for _, w, h in page], gap, aspect=SHEET_ASPECT)
+        for (name, _, _), (x, y, _, _) in zip(page, packed):
+            tiles[name] = (sheet, x, y)
     return tiles

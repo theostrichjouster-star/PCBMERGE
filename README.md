@@ -154,18 +154,39 @@ uniform cells.
 
 ## Schematic layout
 
-By default each design instance gets its own sheet, named after the design, with its
-original coordinates untouched. Because EAGLE treats one net name as one net across
-all sheets, joining a rail needs no wires drawn between pages.
+Three options, set with `--sheet-layout`:
 
-Small designs can share a page instead:
+| Value | Result |
+| --- | --- |
+| `per-design` | one sheet per design instance (default) |
+| `packed` | several designs per sheet, count set by `--sheets-per-page` |
+| `single` | every design on one sheet |
+
+The default leaves each design's coordinates untouched, so every page looks exactly
+as it was drawn. Because EAGLE treats one net name as one net across all sheets,
+joining a rail needs no wires drawn between pages.
+
+To put everything on one sheet:
 
 ```bash
-pcbmerge merge examples/adafruit --sheet-layout packed --sheets-per-page 4
+pcbmerge merge examples/adafruit -o combo --out-dir out --sheet-layout single
 ```
 
-That tiles four designs per sheet and drops the page borders that would otherwise
-overlap, turning eight sheets into two.
+The eight sample designs become a single 705 by 576 mm sheet. Each design is packed
+into rows sized to their tallest member rather than into uniform cells, so a page of
+one large and three small drawings does not pay for the large one four times.
+
+Two things change when designs share a sheet. Page borders are dropped, since eight
+overlapping A4 frames are only noise. And each block gets a caption naming its design,
+drawn on layer 97 (Info) so it never affects connectivity.
+
+Nets that were joined also fold into a single element per name. EAGLE writes one
+`<net>` per name per sheet carrying several segments, and two same-named nets on one
+sheet is not a form it accepts. On the samples, `GND` becomes one net with 88
+segments reaching all eight designs.
+
+One sheet stops being practical at some size. Past about a metre and a half the merge
+says so and suggests `--sheet-layout packed` with a page count instead.
 
 ## Commands
 
@@ -209,7 +230,8 @@ Useful flags:
 - `--link A=B:NAME` tie differently named nets together
 - `--no-suggest` skip the differently-named-net questions
 - `--layout pack|grid|row|column` and `--optimize balanced|airwire|area|none`
-- `--gap 5`, `--columns 3`, `--sheet-layout packed`, `--sheets-per-page 4`
+- `--sheet-layout per-design|packed|single` and `--sheets-per-page 4`
+- `--gap 5` and `--columns 3`
 - `--prefix LEFT --prefix RIGHT` choose reference-designator prefixes yourself
 - `--save-plan used.json` record the answers you gave
 
@@ -265,7 +287,7 @@ pcbmerge check out/combo
 ## What the merged files look like
 
 **Schematic.** Each design instance becomes its own sheet, named after the design it
-came from, unless you pack several per page.
+came from, unless you pack several per page or ask for a single sheet.
 
 **Board.** Source boards are tiled into a packed arrangement, each moved as a rigid
 body so relative placement, rotation and routing survive intact. Joined nets appear

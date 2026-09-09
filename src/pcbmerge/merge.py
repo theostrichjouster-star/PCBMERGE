@@ -18,7 +18,7 @@ from pathlib import Path
 
 from . import layout
 from .eagle import (
-    EagleDoc, EagleError, bbox, clone, content_hash, strip_urns, tidy,
+    EagleDoc, EagleError, bbox, clone, content_hash, fmt, strip_urns, tidy,
     translate, unique_name,
 )
 from .libraries import LibraryMerger, apply_to_element, apply_to_part
@@ -28,6 +28,16 @@ from .plan import InstanceSpec, MergePlan
 # Devicesets that only draw a page border.  Packing several designs onto one
 # sheet has to drop them or the borders overlap into noise.
 FRAME_HINT = "FRAME"
+
+# EAGLE layer 97 is Info: annotation that is not part of the netlist.  The
+# captions naming each block on a shared sheet belong there.
+INFO_LAYER = "97"
+CAPTION_SIZE = "5.08"
+CAPTION_GAP = 5.0
+
+# Past roughly a metre and a half a single sheet stops being something anyone
+# can navigate or print, so the merge says so rather than silently producing it.
+UNWIELDY_SHEET = 1500.0
 
 
 @dataclass
@@ -69,6 +79,7 @@ class MergeReport:
     renamed_library_items: int = 0
     dropped_urns: int = 0
     dropped_frames: int = 0
+    sheet_extent: tuple[float, float, float, float] | None = None
     placements: list[layout.Placement] = field(default_factory=list)
     before: layout.LayoutStats | None = None
     after: layout.LayoutStats | None = None
@@ -201,10 +212,19 @@ class Merger:
             self.report.joined_nets.append(entry)
 
     # -- schematic ----------------------------------------------------------
+    def _designs_per_sheet(self) -> int:
+        """How many designs share a page, given the chosen sheet layout."""
+        if self.plan.sheet_layout == "single":
+            return len(self.designs)
+        if self.plan.sheet_layout == "packed":
+            return max(1, self.plan.sheets_per_page)
+        return 1
+
     def build_schematic(self) -> EagleDoc:
         base = self.designs[0].sch
-        packed = self.plan.sheet_layout == "packed" and self.plan.sheets_per_page > 1
-        tiles = self._sheet_tiles() if packed else {}
+        per_sheet = self._designs_per_sheet()
+        packed = per_sheet > 1 and len(self.designs) > 1
+        tiles = self._sheet_tiles(per_sheet) if packed else {}
 
         root = ET.Element("eagle", {"version": base.version})
         root.text = "\n"
@@ -326,13 +346,15 @@ class Merger:
             pinref.set("part", design.part_map.get(part, part))
 
     # -- schematic packing --------------------------------------------------
-    def _sheet_tiles(self) -> dict[str, tuple[int, float, float]]:
+    def _sheet_tiles(self, per_sheet: int) -> dict[str, tuple[int, float, float]]:
         """Where each design's drawing goes when several share a sheet."""
         sizes: list[tuple[str, float, float]] = []
         for design in self.designs:
             box = self._sheet_extent(design)
-            sizes.append((design.name, box[2] - box[0], box[3] - box[1]))
-        return layout.sheet_tiles(sizes, self.plan.sheets_per_page, gap=25.4)
+            # Leave room above each block for its caption.
+            sizes.append((design.name, box[2] - box[0],
+                          box[3] - box[1] + CAPTION_GAP + float(CAPTION_SIZE)))
+        return layout.sheet_tiles(sizes, per_sheet)
 
     def _sheet_extent(self, design: Design) -> tuple[float, float, float, float]:
         """Bounds of a design's schematic, ignoring its page border."""
@@ -375,11 +397,14 @@ class Merger:
         """Build sheets that hold more than one design each."""
         pages: dict[int, ET.Element] = {}
         labels: dict[int, list[str]] = {}
+        # Per page, the net and bus elements already placed, keyed by name.
+        named: dict[int, dict[tuple[str, str], ET.Element]] = {}
 
         for design in self.designs:
             sheet_index, tile_x, tile_y = tiles.get(design.name, (0, 0.0, 0.0))
             box = self._sheet_extent(design)
             offset = (tile_x - box[0], tile_y - box[1])
+            height = box[3] - box[1]
 
             page = pages.get(sheet_index)
             if page is None:
@@ -395,6 +420,8 @@ class Merger:
                 pages[sheet_index] = page
                 labels[sheet_index] = []
             labels[sheet_index].append(design.name)
+            page.find("plain").append(
+                self._caption(design.name, tile_x, tile_y + height + CAPTION_GAP))
 
             for source_sheet in design.sch.sheets():
                 body = self._sheet_body(design, source_sheet, offset)
@@ -402,12 +429,33 @@ class Merger:
                     target = page.find(part.tag)
                     if target is None:
                         continue
-                    for node in list(part):
-                        target.append(node)
+                    if part.tag in ("nets", "busses"):
+                        _absorb_named(target, part, named.setdefault(sheet_index, {}))
+                    else:
+                        for node in list(part):
+                            target.append(node)
 
         for index, page in pages.items():
             page.find("description").text = ", ".join(labels[index])
+            extent = bbox(page) or (0.0, 0.0, 0.0, 0.0)
+            self.report.sheet_extent = extent
+            width, height = extent[2] - extent[0], extent[3] - extent[1]
+            if max(width, height) > UNWIELDY_SHEET:
+                self.report.warnings.append(
+                    f"sheet is {width:.0f} x {height:.0f} mm, which is awkward to "
+                    f"navigate and to print; consider --sheet-layout packed with "
+                    f"--sheets-per-page")
         return [pages[i] for i in sorted(pages)]
+
+    def _caption(self, text: str, x: float, y: float) -> ET.Element:
+        """A name above a block, so one crowded sheet stays navigable."""
+        node = ET.Element("text", {
+            "x": fmt(x), "y": fmt(y), "size": CAPTION_SIZE,
+            "layer": INFO_LAYER, "ratio": "12", "align": "bottom-left",
+        })
+        node.text = text
+        node.tail = "\n"
+        return node
 
     # -- board --------------------------------------------------------------
     def build_board(self) -> EagleDoc | None:
@@ -606,6 +654,28 @@ class Merger:
         for cls in self._classes:
             node.append(clone(cls))
         return node
+
+
+def _absorb_named(target: ET.Element, source: ET.Element,
+                  seen: dict[tuple[str, str], ET.Element]) -> None:
+    """Append nets or busses to a sheet, folding same-named ones together.
+
+    EAGLE writes one <net> per name per sheet, carrying several <segment>
+    children.  When designs share a page their joined nets meet, and two
+    elements with the same name on one sheet is not a form EAGLE accepts --
+    the segments have to go into a single net instead.
+    """
+    for node in list(source):
+        if not isinstance(node.tag, str):
+            continue
+        key = (node.tag, node.get("name", ""))
+        existing = seen.get(key)
+        if existing is None:
+            seen[key] = node
+            target.append(node)
+            continue
+        for segment in list(node):
+            existing.append(segment)
 
 
 def merge(designs: list[Design], resolver: NetResolver, plan: MergePlan,

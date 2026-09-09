@@ -318,7 +318,10 @@ def _print_report(report, b: str, d: str, o: str) -> None:
     if report.renamed_library_items:
         print(f"  {report.renamed_library_items} clashing library items renamed")
     if report.dropped_frames:
-        print(f"  {report.dropped_frames} page border(s) dropped for packed sheets")
+        print(f"  {report.dropped_frames} page border(s) dropped for shared sheets")
+    if report.sheet_extent:
+        x1, y1, x2, y2 = report.sheet_extent
+        print(f"  sheet is {x2 - x1:.0f} x {y2 - y1:.0f} mm")
     if report.dropped_urns:
         print(f"  {report.dropped_urns} managed-library links converted to local copies")
 
@@ -492,9 +495,10 @@ def build_parser() -> argparse.ArgumentParser:
                          help="millimetres between tiled boards (default: 5)")
         sub.add_argument("--columns", type=int, default=0,
                          help="force a column count for the grid layout")
-        sub.add_argument("--sheet-layout", choices=("per-design", "packed"),
+        sub.add_argument("--sheet-layout", choices=("per-design", "packed", "single"),
                          default="per-design",
-                         help="one sheet per design, or several designs per sheet")
+                         help="one sheet per design (default), several per sheet, "
+                              "or every design on one sheet")
         sub.add_argument("--sheets-per-page", type=int, default=1,
                          help="designs per sheet when --sheet-layout packed")
 
