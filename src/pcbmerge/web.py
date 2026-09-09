@@ -25,7 +25,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-from . import kicad, linking, pruning
+from . import kicad, linking, pruning, sources
 from .eagle import EagleDoc, EagleError, design_stem
 from .merge import Merger, build_resolver, load_designs, merge
 from .nets import Action, Kind
@@ -104,7 +104,10 @@ class Handler(BaseHTTPRequestHandler):
             from . import __version__
 
             self._json({"ok": True, "version": __version__, "start": START,
-                        "canBrowse": can_browse()})
+                        "canBrowse": can_browse(),
+                        "vendors": [{"org": v.org, "label": v.label, "note": v.note}
+                                    for v in sources.VENDORS],
+                        "hasToken": bool(sources.token())})
         else:
             self._json({"error": "not found"}, 404)
 
@@ -113,6 +116,9 @@ class Handler(BaseHTTPRequestHandler):
         actions = {
             "/api/browse": browse,
             "/api/scan": scan,
+            "/api/search": search,
+            "/api/repo": repository,
+            "/api/import": import_designs,
             "/api/analyze": analyze,
             "/api/merge": run_merge,
         }
@@ -189,6 +195,94 @@ def browse(body: dict) -> dict:
     if not chosen:
         return {"cancelled": True}
     return scan({"path": chosen})
+
+
+# --------------------------------------------------------------------------
+# published designs
+# --------------------------------------------------------------------------
+
+DOWNLOADS = "downloads"
+
+
+def search(body: dict) -> dict:
+    """Repositories in the vendor accounts matching what was typed."""
+    query = (body.get("query") or "").strip()
+    vendors = [v for v in (body.get("vendors") or []) if isinstance(v, str)]
+    limit = max(1, min(int(body.get("limit") or 12), 30))
+
+    repos = sources.search(query, orgs=vendors or None, limit=limit)
+    return {
+        "query": query,
+        "repos": [_repo_json(repo) for repo in repos],
+        "hasToken": bool(sources.token()),
+    }
+
+
+def _repo_json(repo) -> dict:
+    return {
+        "repo": repo.full_name, "name": repo.name, "owner": repo.owner,
+        "vendor": repo.vendor, "description": repo.description,
+        "stars": repo.stars, "updated": repo.updated,
+        "branch": repo.branch, "url": repo.url,
+    }
+
+
+def repository(body: dict) -> dict:
+    """The designs inside one repository. One request to GitHub per call."""
+    name = (body.get("repo") or "").strip()
+    if not name:
+        raise ValueError("give a repository as owner/name")
+    branch = (body.get("branch") or "").strip()
+
+    found = sources.designs(name, branch)
+    return {
+        "repo": name,
+        "designs": [_design_json(design) for design in found],
+        "complete": sum(1 for design in found if design.complete),
+    }
+
+
+def _design_json(design) -> dict:
+    return {
+        "repo": design.repo, "name": design.name, "folder": design.folder,
+        "tool": design.tool, "branch": design.branch, "files": design.files,
+        "label": design.label, "summary": design.summary,
+        "complete": design.complete, "size": design.size,
+    }
+
+
+def import_designs(body: dict) -> dict:
+    """Download the chosen designs, then open the folder they landed in.
+
+    The page sends back the same descriptions it was given, so nothing here
+    trusts a path: only the file extension survives into the name written, and
+    the destination is decided on this side.
+    """
+    chosen = [_remote(item) for item in body.get("designs") or []]
+    if not chosen:
+        raise ValueError("pick at least one design to import")
+
+    dest = Path((body.get("dest") or DOWNLOADS).strip()).expanduser()
+    written = sources.fetch_all(chosen, dest)
+
+    result = scan({"path": str(dest)})
+    result["imported"] = [file.name for file in written]
+    result["designsAdded"] = len(chosen)
+    return result
+
+
+def _remote(item: dict) -> sources.RemoteDesign:
+    if not isinstance(item, dict):
+        raise ValueError("a design must be an object")
+    files = {k: v for k, v in (item.get("files") or {}).items()
+             if isinstance(k, str) and isinstance(v, str)}
+    if not files:
+        raise ValueError(f"{item.get('name') or 'design'} lists no files")
+    return sources.RemoteDesign(
+        repo=item.get("repo") or "", name=item.get("name") or "design",
+        folder=item.get("folder") or "", tool=item.get("tool") or "eagle",
+        branch=item.get("branch") or "main", files=files,
+    )
 
 
 def _specs(body: dict) -> list[DesignSpec]:

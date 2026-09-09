@@ -184,6 +184,39 @@
     color: #ffb3ac; font-size: 12px;
   }
 
+  /* ---------- find online ---------- */
+  .vendors { display: flex; flex-wrap: wrap; gap: 12px; margin: 11px 0 2px; }
+  .vendors label {
+    display: flex; align-items: center; gap: 5px; cursor: pointer;
+    font-size: 11.5px; color: var(--ink-dim);
+  }
+  .find-row { display: flex; gap: 7px; margin: 9px 0 4px; }
+  .find-row input { flex: 1; }
+  .repo { border-top: 1px solid var(--line-soft); padding: 8px 0 7px; }
+  .repo-head {
+    display: flex; align-items: baseline; gap: 8px; width: 100%;
+    padding: 0; background: none; border: 0; border-radius: 0;
+    cursor: pointer; text-align: left;
+  }
+  .repo-head .chev { color: var(--ink-faint); font-size: 9px; transition: transform .15s; }
+  .repo.open .repo-head .chev { transform: rotate(90deg); }
+  .repo-head .name {
+    flex: 1; min-width: 0; font-family: var(--mono); font-size: 11.5px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .repo-head:hover .name { color: var(--blue); }
+  .repo .desc { color: var(--ink-faint); font-size: 11px; margin: 3px 0 0 15px; }
+  .designs { display: none; margin: 6px 0 0 15px; }
+  .repo.open .designs { display: block; }
+  .designs .row { padding: 3px 0; }
+  .designs .row + .row { border-top: 0; }
+  .designs .name { font-family: var(--mono); font-size: 11.5px; }
+  .import-bar { display: flex; gap: 7px; align-items: center; margin-top: 12px; }
+  .import-bar input { flex: 1; }
+  .chip.eagle { background: rgba(88,166,255,.15); color: var(--blue); }
+  .chip.kicad { background: rgba(78,201,165,.15); color: var(--green); }
+  .chip.part { background: rgba(227,179,65,.15); color: var(--amber); }
+
   /* ---------- canvas ---------- */
   .stage { display: grid; grid-template-rows: auto 1fr auto; min-height: 0;
            background: var(--bg); }
@@ -269,6 +302,27 @@
   <main>
     <div class="controls" id="controls">
       <div id="error"></div>
+
+      <section id="sec-find">
+        <button class="head" data-toggle><span class="chev">▶</span>
+          <h2>Find designs online</h2><span class="tally" id="t-find">—</span></button>
+        <div class="body">
+          <div class="note">Adafruit, SparkFun and Seeed Studio publish their hardware
+            on GitHub. Whatever you pick here is downloaded into a folder and opened
+            below, ready to merge.</div>
+          <div class="vendors" id="vendors"></div>
+          <div class="find-row">
+            <input id="q" type="text" spellcheck="false"
+                   placeholder="bme280, feather, qwiic, grove…">
+            <button id="search">Search</button>
+          </div>
+          <div id="results"><div class="empty">Nothing searched yet.</div></div>
+          <div class="import-bar" id="import-bar" style="display:none">
+            <input id="dest" type="text" value="downloads" spellcheck="false">
+            <button id="import" class="primary">Import</button>
+          </div>
+        </div>
+      </section>
 
       <section id="sec-designs" class="open">
         <button class="head" data-toggle><span class="chev">▶</span>
@@ -357,6 +411,7 @@
           <b>No designs open</b>
           <div>Choose the folder holding your .sch and .brd files.</div>
           <button id="browse-big" class="primary">Choose folder…</button>
+          <button id="search-big">Search Adafruit, SparkFun, Seeed…</button>
         </div>
         <svg id="canvas" style="display:none"></svg>
       </div>
@@ -393,6 +448,14 @@ const state = {
   decisions: {},
   data: null,
   hotNet: null,
+};
+
+const online = {
+  vendors: [],            // what the server says it can search
+  picked: new Set(),      // organisations currently ticked
+  repos: [],              // search results, each gaining .designs when opened
+  chosen: new Map(),      // key -> design, across every result
+  token: false,
 };
 
 let seq = 0;
@@ -514,6 +577,206 @@ async function browse() {
     $("browse").disabled = false;
     if (!state.data) busy(false);
   }
+}
+
+// -------------------------------------------------------------- find online
+
+function designKey(design) {
+  return `${design.repo}:${design.label}`;
+}
+
+function renderVendors() {
+  const host = $("vendors");
+  host.innerHTML = "";
+  online.vendors.forEach((vendor) => {
+    const label = el("label", null);
+    const box = el("input");
+    box.type = "checkbox";
+    box.checked = online.picked.has(vendor.org);
+    box.onchange = () => {
+      if (box.checked) online.picked.add(vendor.org);
+      else online.picked.delete(vendor.org);
+    };
+    label.append(box, el("span", null, vendor.label));
+    label.title = vendor.note || "";
+    host.append(label);
+  });
+}
+
+async function runSearch() {
+  const query = $("q").value.trim();
+  $("search").disabled = true;
+  $("results").innerHTML = "";
+  $("results").append(el("div", "empty", "Searching…"));
+  try {
+    const data = await post("/api/search", {
+      query,
+      vendors: [...online.picked],
+    });
+    online.repos = data.repos.map((repo) => ({ ...repo, designs: null, open: false, note: "" }));
+    online.chosen.clear();
+    showError("");
+    renderResults();
+    prefetch();
+  } catch (err) {
+    $("results").innerHTML = "";
+    $("results").append(el("div", "empty", "Nothing found."));
+    showError(err.message);
+  } finally {
+    $("search").disabled = false;
+  }
+}
+
+async function loadRepo(repo) {
+  // One request to GitHub per repository, so this is never done in bulk.
+  if (repo.designs || repo.loading) return;
+  repo.loading = true;
+  renderResults();
+  try {
+    const data = await post("/api/repo", { repo: repo.repo, branch: repo.branch });
+    repo.designs = data.designs;
+    repo.note = data.designs.length ? "" : "no designs in this repository";
+  } catch (err) {
+    repo.designs = [];
+    repo.note = err.message;
+    throw err;
+  } finally {
+    repo.loading = false;
+    renderResults();
+  }
+}
+
+async function prefetch() {
+  // Fill in the first few counts so the list is useful without clicking, and
+  // stop at the first refusal rather than spending the whole rate limit.
+  for (const repo of online.repos.slice(0, 4)) {
+    try {
+      await loadRepo(repo);
+    } catch (err) {
+      return;
+    }
+  }
+}
+
+function renderResults() {
+  const host = $("results");
+  host.innerHTML = "";
+  if (!online.repos.length) {
+    host.append(el("div", "empty", "Nothing searched yet."));
+    $("t-find").textContent = "—";
+    $("t-find").className = "tally";
+    $("import-bar").style.display = "none";
+    return;
+  }
+
+  online.repos.forEach((repo) => {
+    const box = el("div", "repo" + (repo.open ? " open" : ""));
+    const head = el("button", "repo-head");
+    head.append(el("span", "chev", "▶"));
+    head.append(el("span", "name", repo.repo));
+    head.append(el("span", "chip part", repo.vendor));
+    head.append(el("span", "sub", countLabel(repo)));
+    head.onclick = () => {
+      repo.open = !repo.open;
+      renderResults();
+      if (repo.open) loadRepo(repo).catch((err) => showError(err.message));
+    };
+    box.append(head);
+
+    if (repo.description) box.append(el("div", "desc", repo.description.slice(0, 130)));
+    box.append(designList(repo));
+    host.append(box);
+  });
+
+  updateImportBar();
+}
+
+function updateImportBar() {
+  // Ticking a box must not rebuild the list: the box being ticked would be
+  // replaced under the pointer and lose focus.
+  const picked = online.chosen.size;
+  $("t-find").textContent = picked ? `${picked} picked`
+    : `${online.repos.length} found`;
+  $("t-find").className = picked ? "tally act" : "tally";
+  $("import-bar").style.display = picked ? "flex" : "none";
+  $("import").textContent = picked === 1 ? "Import 1 design"
+    : `Import ${picked} designs`;
+}
+
+function countLabel(repo) {
+  if (repo.loading) return "reading…";
+  if (repo.designs === null) return `★ ${repo.stars}`;
+  if (!repo.designs.length) return "no designs";
+  const pairs = repo.designs.filter((d) => d.complete).length;
+  return pairs === repo.designs.length
+    ? `${pairs} design${pairs === 1 ? "" : "s"}`
+    : `${pairs} of ${repo.designs.length} complete`;
+}
+
+function designList(repo) {
+  const host = el("div", "designs");
+  if (repo.designs === null) {
+    host.append(el("div", "sub", repo.loading ? "Reading the file list…" : ""));
+    return host;
+  }
+  if (!repo.designs.length) {
+    host.append(el("div", "sub", repo.note || "no EAGLE or KiCad designs here"));
+    return host;
+  }
+
+  repo.designs.forEach((design) => {
+    const key = designKey(design);
+    const row = el("div", "row");
+    const box = el("input");
+    box.type = "checkbox";
+    box.checked = online.chosen.has(key);
+    box.onchange = () => {
+      if (box.checked) online.chosen.set(key, design);
+      else online.chosen.delete(key);
+      updateImportBar();
+    };
+    row.append(box);
+    row.append(el("span", "name", design.label));
+    row.append(el("span", "chip " + design.tool, design.tool));
+    if (!design.complete) {
+      const warn = el("span", "sub", "board only in the drawing");
+      warn.textContent = design.tool === "kicad" ? "no board" : "no .brd";
+      warn.title = "One half of the pair is missing; it will still merge, "
+                 + "without a board.";
+      row.append(warn);
+    }
+    host.append(row);
+  });
+  return host;
+}
+
+async function importChosen() {
+  const chosen = [...online.chosen.values()];
+  if (!chosen.length) return;
+  busy(true);
+  $("import").disabled = true;
+  try {
+    const data = await post("/api/import", {
+      designs: chosen,
+      dest: $("dest").value.trim() || "downloads",
+    });
+    adopt(data);
+    online.chosen.clear();
+    renderResults();
+    $("sec-designs").classList.add("open");
+    await analyze();
+  } catch (err) {
+    showError(err.message);
+    busy(false);
+  } finally {
+    $("import").disabled = false;
+  }
+}
+
+function openFind() {
+  $("sec-find").classList.add("open");
+  $("sec-find").scrollIntoView({ block: "start", behavior: "smooth" });
+  $("q").focus();
 }
 
 // ------------------------------------------------------------------ sections
@@ -925,6 +1188,10 @@ document.querySelectorAll("[data-toggle]").forEach((head) => {
 $("scan").onclick = scan;
 $("browse").onclick = browse;
 $("browse-big").onclick = browse;
+$("search-big").onclick = openFind;
+$("search").onclick = runSearch;
+$("import").onclick = importChosen;
+$("q").onkeydown = (e) => { if (e.key === "Enter") runSearch(); };
 $("path").onkeydown = (e) => { if (e.key === "Enter") scan(); };
 $("merge").onclick = runMerge;
 ["o-outline", "o-gap", "o-layout", "o-optimize"]
@@ -938,6 +1205,17 @@ fetch("/api/health").then((r) => r.json()).then((d) => {
     $("browse").style.display = "none";
     $("browse-big").style.display = "none";
     $("path").placeholder = "paste a path to a folder of .sch files";
+  }
+  if (d.vendors) {
+    online.vendors = d.vendors;
+    d.vendors.forEach((v) => online.picked.add(v.org));
+    online.token = !!d.hasToken;
+    renderVendors();
+    if (!d.hasToken) {
+      $("vendors").append(el("div", "sub",
+        "Unauthenticated GitHub allows a few searches an hour. "
+        + "Set GITHUB_TOKEN before starting to raise that."));
+    }
   }
   if (d.start) { $("path").value = d.start; scan(); }
 });

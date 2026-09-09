@@ -9,6 +9,7 @@ you route.
 
 | Module | Responsibility |
 | --- | --- |
+| `sources.py` | Search the vendor accounts on GitHub and download designs. |
 | `sexp.py` | Read the S-expressions KiCad writes. |
 | `kicad.py` | Convert a KiCad design into an EAGLE pair on the way in. |
 | `eagle.py` | Load, save and transform EAGLE XML. Coordinate translation, content hashing, name sanitising. |
@@ -23,6 +24,40 @@ you route.
 | `cli.py` | `inspect`, `parts`, `plan`, `merge`, `check`, `web`. |
 | `web.py` | A loopback HTTP server exposing the engine to the browser. |
 | `static/app.html` | The whole front end: one file, no dependencies. |
+
+## Where designs come from
+
+Merging vendor boards means first having them, and that used to mean finding the
+repository by hand. `sources.py` searches Adafruit, SparkFun and Seeed Studio on
+GitHub and downloads what is chosen. It has no merge logic and nothing else
+depends on it: what it produces is a folder, which is already a valid input.
+
+Three decisions shape it.
+
+**One search per account, then interleaved.** GitHub supports several `org:`
+qualifiers in one query, but the ranking would then be free to fill the page with
+whichever vendor happens to rank well for those words. Searching each account
+separately and taking a row at a time from each guarantees all three are
+represented.
+
+**Hardware is ranked above software.** A search for a part number finds the driver
+library long before the board, because the library is what people star and link
+to. `hardware_rank` scores a repository on words like *pcb*, *breakout* and
+*shield* against *library*, *driver* and *firmware*, and reorders each account's
+results. It only reorders: nothing a search returned is hidden.
+
+**Contents are listed lazily.** A search costs one request per vendor and listing
+a repository costs one more, against a limit of sixty an hour unauthenticated.
+Results are named first and looked inside only when opened, the front end filling
+in the first few and stopping at the first refusal. Every answer is cached for ten
+minutes.
+
+Downloading pairs files the same way the rest of the tool does, by extension after
+a shared stem, and writes both halves of a design under one name. Renaming one
+half without the other would hide the board from the merge. Nothing a repository
+supplies is used as a path: the name is sanitised, only a known design extension
+survives, and the destination is decided locally, so a crafted filename cannot
+write outside the folder or choose its own extension.
 
 ## Reading KiCad
 
@@ -317,6 +352,11 @@ of overlapping text.
 `tests/conftest.py` builds small synthetic EAGLE designs that clash deliberately:
 same part names, same library names with different pad geometry, and a net set
 covering every bucket. Those tests run in milliseconds and pin the behaviour.
+
+`tests/test_sources.py` never touches the network: GitHub is replaced with canned
+payloads, which is the only way to pin behaviour that would otherwise depend on
+what Adafruit published this week. It covers the interleaving, the pairing rules,
+the sanitising of names, and the failures GitHub actually produces.
 
 `tests/test_kicad.py` builds a small KiCad board inline rather than leaning on the
 sample, so the parser, the axis flip, the arc maths and the net renaming are each

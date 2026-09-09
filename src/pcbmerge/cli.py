@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import argparse
 import sys
+from fnmatch import fnmatch
 from pathlib import Path
 
 from . import kicad, layout, linking, prompt, pruning
 from .eagle import EagleDoc, EagleError, design_stem, with_ext
+from . import sources
 from .libraries import LibraryMerger
 from .merge import build_resolver, load_designs, merge
 from .nets import Action, Kind, NetResolver
@@ -465,6 +467,117 @@ def _print_report(report, b: str, d: str, o: str) -> None:
           f"between the sub-boards.{o}")
 
 
+def cmd_search(args: argparse.Namespace) -> int:
+    """Look for published designs in the vendors' GitHub accounts."""
+    b, d, o = _color(not args.no_color)
+    orgs = _orgs(args.vendor)
+
+    repos = sources.search(" ".join(args.terms), orgs=orgs, limit=args.limit)
+    if not repos:
+        print(f"nothing matching {' '.join(args.terms)!r} in "
+              f"{', '.join(orgs)}" if args.terms else "no repositories found")
+        return 1
+
+    print(f"{b}{len(repos)} repositor{'y' if len(repos) == 1 else 'ies'}{o}")
+    for repo in repos:
+        print(f"\n  {b}{repo.full_name}{o}  {d}{repo.vendor}, "
+              f"{repo.stars} star(s), updated {repo.updated or 'unknown'}{o}")
+        if repo.description:
+            print(f"    {repo.description[:96]}")
+        if args.designs:
+            _print_designs(sources.designs(repo.full_name, repo.branch), d, o)
+
+    if not args.designs:
+        print(f"\n{d}pcbmerge fetch <owner/name>   to see the designs inside one{o}")
+    else:
+        print(f"\n{d}pcbmerge fetch <owner/name> --all --dest downloads{o}")
+    if not sources.token():
+        print(f"{d}GitHub allows a few requests an hour unauthenticated; set "
+              f"GITHUB_TOKEN to raise that.{o}")
+    return 0
+
+
+def _print_designs(found: list, d: str, o: str, indent: str = "    ") -> None:
+    if not found:
+        print(f"{indent}{d}no EAGLE or KiCad designs in this repository{o}")
+        return
+    for design in found:
+        mark = " " if design.complete else "!"
+        print(f"{indent}{mark} {design.label:<52} {d}{design.tool}, "
+              f"{design.summary}{o}")
+
+
+def cmd_fetch(args: argparse.Namespace) -> int:
+    """List or download the designs in one repository."""
+    b, d, o = _color(not args.no_color)
+    repo = sources.repository(args.repo)
+    found = sources.designs(repo.full_name, repo.branch)
+
+    print(f"{b}{repo.full_name}{o}  {d}{repo.vendor}, branch {repo.branch}{o}")
+    if not found:
+        print(f"  {d}no EAGLE or KiCad designs in this repository{o}")
+        return 1
+
+    chosen = _chosen(found, args)
+    if not chosen:
+        _print_designs(found, d, o, indent="  ")
+        print(f"\n{d}--design <name> to take one, --all to take every complete "
+              f"pair{o}")
+        return 0
+
+    dest = Path(args.dest).expanduser()
+    written = sources.fetch_all(chosen, dest)
+    print(f"\n{b}{len(chosen)} design(s) into {dest}{o}")
+    for file in written:
+        print(f"  {file.name}")
+    print(f"\n{d}pcbmerge web {dest}{o}")
+    return 0
+
+
+def _chosen(found: list, args: argparse.Namespace) -> list:
+    """The designs named on the command line, or all of them."""
+    if args.all:
+        complete = [design for design in found if design.complete]
+        return complete or found
+    if not args.design:
+        return []
+
+    picked: list = []
+    for pattern in args.design:
+        matches = [design for design in found
+                   if fnmatch(design.name.lower(), pattern.lower())
+                   or fnmatch(design.label.lower(), pattern.lower())]
+        if not matches:
+            raise EagleError(f"no design matching {pattern!r} in this repository")
+        for design in matches:
+            if design not in picked:
+                picked.append(design)
+    return picked
+
+
+def _orgs(vendors: list[str] | None) -> list[str]:
+    """Turn --vendor values into organisation names, accepting either form."""
+    if not vendors:
+        return list(sources.ORGS)
+    out: list[str] = []
+    for raw in vendors:
+        source = sources.source_for(raw) or _by_label(raw)
+        if source is None:
+            known = ", ".join(s.org for s in sources.VENDORS)
+            raise EagleError(f"unknown vendor {raw!r}; choose from {known}")
+        if source.org not in out:
+            out.append(source.org)
+    return out
+
+
+def _by_label(raw: str):
+    wanted = raw.strip().lower().replace(" ", "").replace("-", "")
+    for source in sources.VENDORS:
+        if source.label.lower().replace(" ", "") == wanted:
+            return source
+    return None
+
+
 def cmd_web(args: argparse.Namespace) -> int:
     """Open the visual front end in a browser."""
     from . import web
@@ -686,6 +799,31 @@ def build_parser() -> argparse.ArgumentParser:
     site.add_argument("-v", "--verbose", action="store_true",
                       help="log every request")
     site.set_defaults(func=cmd_web)
+
+    vendors = ", ".join(s.org for s in sources.VENDORS)
+    finder = subparsers.add_parser(
+        "search", help="find published designs on GitHub")
+    finder.add_argument("terms", nargs="*",
+                        help="words to search for, e.g. bme280 breakout")
+    finder.add_argument("--vendor", action="append",
+                        help=f"limit to one account ({vendors}); repeatable")
+    finder.add_argument("--limit", type=int, default=12,
+                        help="how many repositories to show (default: 12)")
+    finder.add_argument("--designs", action="store_true",
+                        help="also list the designs inside each result "
+                             "(one request per repository)")
+    finder.set_defaults(func=cmd_search)
+
+    getter = subparsers.add_parser(
+        "fetch", help="download designs from a repository into a folder")
+    getter.add_argument("repo", help="owner/name, or a github.com URL")
+    getter.add_argument("--design", action="append",
+                        help="which design to take; wildcards allowed. Repeatable")
+    getter.add_argument("--all", action="store_true",
+                        help="take every complete pair in the repository")
+    getter.add_argument("--dest", default="downloads",
+                        help="folder to download into (default: downloads)")
+    getter.set_defaults(func=cmd_fetch)
 
     checker = subparsers.add_parser("check", help="verify a .sch/.brd pair is consistent")
     checker.add_argument("design", help="a .sch, .brd, or shared stem")

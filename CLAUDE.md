@@ -5,9 +5,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 `pcbmerge` combines several PCB designs into one schematic and one board. It reads
-EAGLE (`.sch` / `.brd`) and KiCad (`.kicad_pcb`), and always writes EAGLE. The hard
-parts are naming (everything collides) and net resolution (deciding which nets from
-different designs are the same wire).
+EAGLE (`.sch` / `.brd`) and KiCad (`.kicad_pcb`), and always writes EAGLE. It can
+also search Adafruit, SparkFun and Seeed Studio on GitHub and download designs to
+merge. The hard parts are naming (everything collides) and net resolution (deciding
+which nets from different designs are the same wire).
 
 ## Commands
 
@@ -32,6 +33,13 @@ pcbmerge inspect examples/adafruit
 pcbmerge merge examples/adafruit -o combo --out-dir out --yes
 pcbmerge check out/combo
 pcbmerge web examples/adafruit
+```
+
+The search reaches the network, so it is exercised by hand rather than in the suite:
+
+```bash
+pcbmerge search bme280
+pcbmerge fetch adafruit/Adafruit-BME280-Breakout-PCB --all --dest downloads
 ```
 
 `check` is the fast correctness gate: it verifies a `.sch`/`.brd` pair references
@@ -69,6 +77,7 @@ signals no schematic net matches, which EAGLE rejects.
 | --- | --- |
 | `eagle.py` | Load/save EAGLE XML, coordinate translation, content hashing, name safety |
 | `sexp.py` | Read the S-expressions KiCad writes |
+| `sources.py` | Search the vendor GitHub accounts; download designs into a folder |
 | `kicad.py` | Convert a KiCad design into an EAGLE pair |
 | `libraries.py` | Merge library sets, renaming items that clash by name but differ in content |
 | `nets.py` | Classify net names; decide join or split |
@@ -138,6 +147,30 @@ back-side footprints mirror; arcs go from three points to an included angle; net
 only their leaf (`/Sheet/VCC_3V3` → `VCC_3V3`) or no rail would match, and `Net-(U1-Pad2)`
 becomes `N$1` so the resolver treats it as anonymous.
 
+### Vendor search
+
+`sources.py` reaches GitHub with `urllib` and knows nothing about merging. What it
+produces is a folder, which is already a valid input, so nothing downstream changed
+to accommodate it.
+
+- **The module is `sources`, not `catalog`.** `pruning.catalog` is exported from the
+  package, and `from . import catalog` inside `cli.py` would resolve to that function
+  rather than the submodule.
+- **One search per vendor, interleaved.** Several `org:` qualifiers in one query let
+  the ranking fill the page with a single account.
+- **Hardware is ranked above software.** Searching a part number finds the driver
+  library long before the board. `hardware_rank` reorders each account's results; it
+  never hides anything.
+- **Contents are listed lazily.** Sixty unauthenticated requests an hour, ten searches
+  a minute. Answers are cached for ten minutes and the page looks inside only the
+  first few results, stopping at the first refusal. `GITHUB_TOKEN` raises the limit.
+- **A downloaded design keeps one stem for both halves**, or the merge cannot find the
+  board. Nothing from the repository is used as a path: the name is sanitised, only a
+  known design extension survives, and a repeat download gets its own stem.
+
+`SourceError` subclasses `EagleError` deliberately, so the CLI and the web front end
+report a network failure through the paths they already have.
+
 ### Plan and web
 
 `MergePlan` is the serialisation boundary — designs, counts, drops, net decisions, links,
@@ -160,3 +193,8 @@ Tests assert behaviour and invariants, not incidental values. Derive prefixes fr
 `collect_specs` rather than hardcoding them; they change when the naming heuristic does.
 `tests/test_board_output.py` and `tests/test_single_sheet.py` exist specifically to pin the
 things only EAGLE would otherwise catch.
+
+`tests/test_sources.py` never touches the network. GitHub is replaced with canned
+payloads keyed by URL fragment; the fake resolves the deepest fragment, because a tree
+URL contains the repository URL. Do not add a test there that would make a real
+request.

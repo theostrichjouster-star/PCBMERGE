@@ -60,6 +60,68 @@ The server binds to the loopback address and reads and writes files as you, whic
 is right for a tool you start yourself and wrong for anything exposed to a
 network. It needs no internet connection and loads nothing from a CDN.
 
+## Finding designs to merge
+
+Adafruit, SparkFun and Seeed Studio publish their hardware on GitHub as the same
+EAGLE and KiCad files this tool reads. `search` looks through all three accounts
+at once, `fetch` brings a design down into a folder, and that folder is then an
+ordinary input.
+
+```bash
+pcbmerge search bme280
+pcbmerge fetch adafruit/Adafruit-BME280-Breakout-PCB --all --dest downloads
+pcbmerge merge downloads -o combo --out-dir out --yes
+```
+
+```
+6 repositories
+
+  adafruit/Adafruit-BME280-Breakout-PCB  Adafruit, 11 star(s), updated 2019-06-21
+    PCB files for the Adafruit BME280 Breakout
+
+  sparkfun/Qwiic_Atmospheric_Sensor_Breakout_BME280  SparkFun, 2 star(s), updated 2024-07-23
+    A basic Qwiic board to provide atmospheric data from the BME280.
+```
+
+Results come back a row at a time from each account, so one vendor cannot crowd
+out the others, and hardware is pulled above software before they are shown.
+Searching a part number otherwise returns the driver library long before the board
+it drives, because that is what people star and link to.
+
+`--vendor` narrows the search to one account, and `--designs` looks inside each
+result rather than only naming it:
+
+```bash
+pcbmerge search qwiic --vendor sparkfun --designs
+```
+
+`fetch` on its own lists what a repository holds and writes nothing:
+
+```
+adafruit/Adafruit-BME280-Breakout-PCB  Adafruit, branch master
+    Adafruit BME280                            eagle, .brd, .sch
+```
+
+Add `--all` to take every complete pair, or `--design` with a name or wildcard to
+take one. Both halves of a design are written under a single stem, because the
+merge finds the board by the schematic's name. Nothing from the repository is used
+as a path: only the extension survives, and a second copy of the same design gets
+its own stem rather than overwriting the first.
+
+The front end has the same thing as a panel. Tick the vendors, type a search, open a
+result to see its designs, and importing downloads them and opens the folder ready
+to merge, without leaving the page.
+
+### Rate limits
+
+GitHub allows about sixty unauthenticated requests an hour, and searches are counted
+separately at ten a minute. A search costs one request per vendor, and looking inside
+a repository costs one more. Answers are cached for ten minutes, and the front end
+only looks inside the first few results, leaving the rest until they are opened.
+
+Setting `GITHUB_TOKEN` (or `GH_TOKEN`) to a personal access token raises the limit
+considerably. No scopes are needed for public repositories.
+
 ## KiCad designs
 
 A `.kicad_pcb` can go into a merge beside EAGLE files, with no flag and nothing to
@@ -459,6 +521,25 @@ Open the visual front end described above.
 pcbmerge web [folder] [--port 8765] [--no-browser]
 ```
 
+### search
+
+```bash
+pcbmerge search [terms ...] [--vendor ORG] [--limit N] [--designs]
+```
+
+Finds repositories in the vendor accounts. With no terms it lists the most popular
+in each. `--vendor` is repeatable and takes either form of a name, `sparkfun` or
+`SparkFun`.
+
+### fetch
+
+```bash
+pcbmerge fetch OWNER/NAME [--design NAME] [--all] [--dest DIR]
+```
+
+Lists the designs in a repository, or downloads them. A `github.com` URL works in
+place of `owner/name`. Without `--design` or `--all` nothing is written.
+
 ### parts
 
 List every part, grouped by kind so a decision covers all its copies at once.
@@ -555,6 +636,7 @@ pcbmerge check out/combo
 ## Limitations
 
 - Writes EAGLE only. Reads EAGLE and KiCad; Altium is not supported.
+- Search covers the three vendor accounts only, and reads public repositories.
 - A KiCad schematic's drawing is not converted. The schematic is rebuilt from the
   board netlist as boxes with one pin per pad.
 - KiCad copper pours come across as their outline polygons, not as the filled shape

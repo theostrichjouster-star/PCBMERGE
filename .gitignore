@@ -4,3 +4,4 @@ out/
 *.egg-info/
 .pytest_cache/
 merge-plan.json
+downloads/
