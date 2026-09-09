@@ -203,7 +203,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
 
     plan = plan_from_resolver(
         resolver, specs, output=args.output, title=args.title or args.output,
-        drops=drops, layout=args.layout, optimize=args.optimize, gap=args.gap, columns=args.columns,
+        drops=drops, outline=args.outline, layout=args.layout, optimize=args.optimize, gap=args.gap, columns=args.columns,
         sheet_layout=args.sheet_layout, sheets_per_page=args.sheets_per_page,
     )
     path = plan.save(args.plan_out)
@@ -306,8 +306,8 @@ def cmd_merge(args: argparse.Namespace) -> int:
         plan = MergePlan(
             output=args.output or "merged", title=args.title or args.output or "merged",
             designs=specs, drops=list(args.drop or []),
-            layout=args.layout, optimize=args.optimize, gap=args.gap,
-            columns=args.columns, sheet_layout=args.sheet_layout,
+            layout=args.layout, optimize=args.optimize, outline=args.outline,
+            gap=args.gap, columns=args.columns, sheet_layout=args.sheet_layout,
             sheets_per_page=args.sheets_per_page,
         )
 
@@ -358,7 +358,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
     if args.save_plan:
         plan_from_resolver(
             resolver, specs, output=plan.output, title=plan.title,
-            drops=plan.drops, layout=plan.layout, optimize=plan.optimize, gap=plan.gap,
+            drops=plan.drops, outline=plan.outline, layout=plan.layout, optimize=plan.optimize, gap=plan.gap,
             columns=plan.columns, sheet_layout=plan.sheet_layout,
             sheets_per_page=plan.sheets_per_page,
         ).save(args.save_plan)
@@ -414,6 +414,8 @@ def _print_report(report, b: str, d: str, o: str) -> None:
     before, after = report.before, report.after
     if before and after:
         print(f"\n{b}Board layout{o}")
+        if report.outline:
+            print(f"  outline    {report.outline[0]:.0f} x {report.outline[1]:.0f} mm")
         print(f"  {'':<12} {'size (mm)':>18} {'fill':>7} {'airwire (mm)':>14}")
         print(f"  {'start':<12} {before.width:8.1f} x {before.height:6.1f} "
               f"{before.utilization:6.0f}% {before.airwire:14.0f}")
@@ -565,6 +567,10 @@ def build_parser() -> argparse.ArgumentParser:
                          help="how source boards are tiled (default: pack)")
         sub.add_argument("--optimize", choices=tuple(layout.WEIGHTS), default="balanced",
                          help="what the placement search minimises (default: balanced)")
+        sub.add_argument("--outline", default=layout.DEFAULT_OUTLINE,
+                         help="board outline in mm, e.g. 100x150 (default); "
+                              "'keep' preserves each source board's own outline, "
+                              "'none' draws none")
         sub.add_argument("--gap", type=float, default=5.0,
                          help="millimetres between tiled boards (default: 5)")
         sub.add_argument("--columns", type=int, default=0,

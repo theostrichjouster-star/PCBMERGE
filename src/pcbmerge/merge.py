@@ -39,6 +39,10 @@ CAPTION_GAP = 5.0
 # can navigate or print, so the merge says so rather than silently producing it.
 UNWIELDY_SHEET = 1500.0
 
+# Margin between a fixed board outline and the sub-boards placed inside it.
+OUTLINE_MARGIN = 2.0
+OUTLINE_WIDTH = "0"
+
 
 @dataclass
 class Design:
@@ -82,6 +86,7 @@ class MergeReport:
     dropped_frames: int = 0
     dropped_parts: int = 0
     sheet_extent: tuple[float, float, float, float] | None = None
+    outline: tuple[float, float] | None = None
     placements: list[layout.Placement] = field(default_factory=list)
     before: layout.LayoutStats | None = None
     after: layout.LayoutStats | None = None
@@ -284,7 +289,7 @@ class Merger:
             node = base.drawing.find(tag)
             if node is not None:
                 drawing.append(clone(node))
-        drawing.append(self._merged_layers())
+        drawing.append(self._merged_layers("sch"))
 
         schematic = ET.SubElement(drawing, "schematic")
         schematic.text = "\n"
@@ -506,6 +511,8 @@ class Merger:
             return None
         base = boards[0].brd
 
+        self.report.outline = layout.parse_outline(self.plan.outline)
+        keep_outlines = layout.keeps_source_outlines(self.plan.outline)
         placements = self._place(boards)
         by_design = {p.design: p for p in placements}
         self.report.placements = placements
@@ -518,13 +525,14 @@ class Merger:
             node = base.drawing.find(tag)
             if node is not None:
                 drawing.append(clone(node))
-        drawing.append(self._merged_layers())
+        drawing.append(self._merged_layers("brd"))
 
         board = ET.SubElement(drawing, "board")
         board.text = "\n"
 
         plain = ET.SubElement(board, "plain")
         plain.text = "\n"
+        outline = self.report.outline
         for design in boards:
             source = design.brd.section.find("plain")
             if source is None:
@@ -533,7 +541,14 @@ class Merger:
             place = by_design[design.name]
             translate(copy, place.dx, place.dy)
             for node in list(copy):
+                if not keep_outlines and _is_outline(node):
+                    # The merged board gets one outline of its own; carrying
+                    # over each sub-board's would leave a pile of rectangles.
+                    continue
                 plain.append(node)
+        if outline is not None:
+            for wire in _outline_wires(*outline):
+                plain.append(wire)
 
         board.append(self.libs.build())
         board.append(self._merged_attributes([d.brd for d in boards]))
@@ -600,18 +615,47 @@ class Merger:
         return doc
 
     def _place(self, boards: list[Design]) -> list[layout.Placement]:
-        """Choose where each board goes, optimising if asked to."""
+        """Choose where each board goes, optimising if asked to.
+
+        With a fixed outline the sub-boards are packed to its width and laid
+        out from its top-left corner, so they land inside the board you are
+        actually going to have made.
+        """
         measured = layout.measure([(d.name, d.brd.section) for d in boards])
         centroids = {d.name: self._net_centroids(d) for d in boards}
+
+        outline = self.report.outline
+        if outline is not None:
+            origin = (OUTLINE_MARGIN, outline[1] - OUTLINE_MARGIN)
+            max_width = outline[0] - 2 * OUTLINE_MARGIN
+        else:
+            origin, max_width = (0.0, 0.0), 0.0
 
         placements, before, after = layout.optimize(
             measured, centroids,
             style=self.plan.layout, gap=self.plan.gap, columns=self.plan.columns,
-            goal=self.plan.optimize,
+            goal=self.plan.optimize, origin=origin, max_width=max_width,
         )
         self.report.before = before
         self.report.after = after
+        self._check_fit(placements)
         return placements
+
+    def _check_fit(self, placements: list[layout.Placement]) -> None:
+        """Say so when the sub-boards do not fit the outline they were given."""
+        outline = self.report.outline
+        if outline is None or not placements:
+            return
+        right = max(p.x + p.width for p in placements)
+        bottom = min(p.y for p in placements)
+        over_x = right - (outline[0] - OUTLINE_MARGIN)
+        over_y = OUTLINE_MARGIN - bottom
+        if over_x > 0.01 or over_y > 0.01:
+            self.report.warnings.append(
+                f"the sub-boards need {right + OUTLINE_MARGIN:.0f} x "
+                f"{outline[1] - bottom + OUTLINE_MARGIN:.0f} mm and overflow the "
+                f"{outline[0]:.0f} x {outline[1]:.0f} mm outline; give --outline a "
+                f"bigger size or move them by hand")
 
     def _net_centroids(self, design: Design) -> dict[str, tuple[float, float]]:
         """Where each merged net sits on this board, in its own coordinates.
@@ -641,13 +685,20 @@ class Merger:
         return out
 
     # -- shared pieces ------------------------------------------------------
-    def _merged_layers(self) -> ET.Element:
-        """Union of every layer definition, keyed by layer number."""
+    def _merged_layers(self, kind: str) -> ET.Element:
+        """Union of the layer definitions of one kind of drawing.
+
+        Layer tables are not interchangeable.  A schematic marks the copper
+        layers `visible="no" active="no"` because it has no use for them; a
+        board needs exactly those layers switched on.  Taking the schematic's
+        table for the board hides every footprint.
+        """
         node = ET.Element("layers")
         node.text = "\n"
         seen: dict[int, ET.Element] = {}
         for design in self.designs:
-            docs = [design.sch] + ([design.brd] if design.brd else [])
+            docs = [design.sch] if kind == "sch" else (
+                [design.brd] if design.brd is not None else [])
             for doc in docs:
                 for layer in doc.layers():
                     if not isinstance(layer.tag, str):
@@ -698,6 +749,27 @@ class Merger:
         for cls in self._classes:
             node.append(clone(cls))
         return node
+
+
+def _is_outline(node: ET.Element) -> bool:
+    """Board-shape geometry, which the merged board replaces with its own."""
+    return (isinstance(node.tag, str)
+            and node.tag in ("wire", "circle", "rectangle", "polygon")
+            and node.get("layer") == layout.DIMENSION_LAYER)
+
+
+def _outline_wires(width: float, height: float) -> list[ET.Element]:
+    """A plain rectangle on the Dimension layer, starting at the origin."""
+    corners = [(0.0, 0.0), (width, 0.0), (width, height), (0.0, height), (0.0, 0.0)]
+    wires: list[ET.Element] = []
+    for (x1, y1), (x2, y2) in zip(corners, corners[1:]):
+        wire = ET.Element("wire", {
+            "x1": fmt(x1), "y1": fmt(y1), "x2": fmt(x2), "y2": fmt(y2),
+            "width": OUTLINE_WIDTH, "layer": layout.DIMENSION_LAYER,
+        })
+        wire.tail = "\n"
+        wires.append(wire)
+    return wires
 
 
 def _rewrite_signal_body(signal: ET.Element, design: Design) -> None:

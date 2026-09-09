@@ -237,6 +237,32 @@ Control it with `--optimize`:
 Pick the tiling with `--layout pack` (default), `row`, `column`, or `grid` for
 uniform cells.
 
+## The board outline
+
+The merged board gets one plain rectangle on the Dimension layer, 100 by 150 mm
+by default, and the sub-boards are packed to fit inside it. Each source board's
+own outline is discarded, because carrying eight of them over leaves a pile of
+overlapping rectangles rather than a board shape.
+
+```bash
+pcbmerge merge examples/adafruit --outline 80x100
+```
+
+| Value | Result |
+| --- | --- |
+| `100x150` | one rectangle that size (default) |
+| any `WxH` | one rectangle of your dimensions |
+| `keep` | every source board's outline, carried over in place |
+| `none` | outlines removed, nothing drawn |
+
+If the sub-boards do not fit, they are still placed and the overflow is reported
+with the size they actually need:
+
+```
+the sub-boards need 55 x 333 mm and overflow the 100 x 150 mm outline;
+give --outline a bigger size or move them by hand
+```
+
 ## Schematic layout
 
 Three options, set with `--sheet-layout`:
@@ -317,6 +343,7 @@ Useful flags:
 - `--drop MOUNTINGHOLE` leave parts out; `--no-prune` skips the question
 - `--no-suggest` skip the differently-named-net questions
 - `--layout pack|grid|row|column` and `--optimize balanced|airwire|area|none`
+- `--outline 100x150`, or `keep` / `none`
 - `--sheet-layout per-design|packed|single` and `--sheets-per-page 4`
 - `--gap 5` and `--columns 3`
 - `--prefix LEFT --prefix RIGHT` choose reference-designator prefixes yourself
@@ -359,6 +386,7 @@ A plan also carries copy counts, hand-made links, and the layout settings:
   "drops": ["MOUNTINGHOLE", "FIDUCIAL"],
   "layout": "pack",
   "optimize": "balanced",
+  "outline": "100x150",
   "sheet_layout": "per-design"
 }
 ```
@@ -387,10 +415,14 @@ pcbmerge check out/combo
 **Schematic.** Each design instance becomes its own sheet, named after the design it
 came from, unless you pack several per page or ask for a single sheet.
 
-**Board.** Source boards are tiled into a packed arrangement, each moved as a rigid
-body so relative placement, rotation and routing survive intact. Joined nets appear
-as airwires spanning the sub-boards, which is the list of connections you still have
-to route.
+**Board.** Source boards are tiled into a packed arrangement inside a single
+outline, each moved as a rigid body so relative placement, rotation and routing
+survive intact. Joined nets appear as airwires spanning the sub-boards, which is
+the list of connections you still have to route.
+
+Each file keeps the layer table of its own kind. A schematic marks the copper
+layers hidden because it has no use for them, and a board needs exactly those
+layers switched on, so the two tables are not interchangeable.
 
 **Names.** Every part gets a short prefix from its design, so `R1` becomes
 `ESP32S3_R1`. Library items that clash by name but differ in content are kept side
@@ -408,8 +440,7 @@ The merged board is a starting point, not a finished layout. After opening it:
 1. Run ERC on the schematic and DRC on the board.
 2. Look at the airwires. Those are the joined nets, currently unrouted between
    sub-boards.
-3. Adjust the arrangement if you want, then draw a single outline on the Dimension
-   layer and delete the inherited ones.
+3. Adjust the arrangement if you want, and resize the outline to suit.
 
 ## Install
 
@@ -429,6 +460,4 @@ Run the tests with `pip install -e ".[dev]"` then `pytest`.
 - Buses are copied per sheet but never joined across designs.
 - Placement search permutes which board goes where. It does not rotate boards or
   attempt non-rectangular nesting.
-- The board outline is not recomputed. Each source outline is carried over in
-  place, so you get several rectangles rather than one board shape.
 - Copper is never re-routed. Joined nets are left as airwires on purpose.

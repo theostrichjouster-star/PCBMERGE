@@ -100,12 +100,17 @@ def measure(boards: list[tuple[str, ET.Element]]) -> list[Board]:
 
 
 def place(boards: list[Board], style: str = "grid", gap: float = 5.0,
-          columns: int = 0, origin: tuple[float, float] = (0.0, 0.0)) -> list[Placement]:
-    """Turn an ordered list of boards into placements."""
+          columns: int = 0, origin: tuple[float, float] = (0.0, 0.0),
+          max_width: float = 0.0) -> list[Placement]:
+    """Turn an ordered list of boards into placements.
+
+    `max_width` constrains packing to a given width, which is how boards are
+    kept inside a board outline of a fixed size.
+    """
     if not boards:
         return []
     if style == "pack":
-        return _shelf(boards, gap, origin)
+        return _shelf(boards, gap, origin, max_width)
     return _grid(boards, style, gap, columns, origin)
 
 
@@ -137,7 +142,8 @@ def _grid(boards: list[Board], style: str, gap: float, columns: int,
 
 
 def shelf_positions(sizes: list[tuple[float, float]], gap: float,
-                    aspect: float = 1.0) -> list[tuple[float, float, int, int]]:
+                    aspect: float = 1.0,
+                    max_width: float = 0.0) -> list[tuple[float, float, int, int]]:
     """Pack rectangles into rows sized to their tallest member.
 
     Returns the bottom-left corner of each item plus its row and column, with
@@ -149,7 +155,12 @@ def shelf_positions(sizes: list[tuple[float, float]], gap: float,
         return []
     total_area = sum(w * h for w, h in sizes)
     widest = max(w for w, _ in sizes)
-    target = max(widest, math.sqrt(total_area * aspect) * 1.15)
+    if max_width > 0:
+        # A fixed width wins, except that a board wider than it still has to
+        # go somewhere; it overflows and the caller reports that.
+        target = max(widest, max_width)
+    else:
+        target = max(widest, math.sqrt(total_area * aspect) * 1.15)
 
     out: list[tuple[float, float, int, int]] = []
     cursor_x = 0.0
@@ -171,11 +182,13 @@ def shelf_positions(sizes: list[tuple[float, float]], gap: float,
     return out
 
 
-def _shelf(boards: list[Board], gap: float, origin: tuple[float, float]) -> list[Placement]:
+def _shelf(boards: list[Board], gap: float, origin: tuple[float, float],
+           max_width: float = 0.0) -> list[Placement]:
     """Shelf packing for boards: no wasted uniform cell, roughly square."""
     sizes = [(b.width, b.height) for b in boards]
+    packed = shelf_positions(sizes, gap, max_width=max_width)
     placements: list[Placement] = []
-    for board, (px, py, row, column) in zip(boards, shelf_positions(sizes, gap)):
+    for board, (px, py, row, column) in zip(boards, packed):
         x, y = origin[0] + px, origin[1] + py
         placements.append(Placement(board.design, x - board.min_x, y - board.min_y,
                                     board.width, board.height, x, y, column, row))
@@ -259,14 +272,19 @@ def optimize(
     goal: str = "balanced",
     iterations: int = 4000,
     seed: int = 0,
+    origin: tuple[float, float] = (0.0, 0.0),
+    max_width: float = 0.0,
 ) -> tuple[list[Placement], LayoutStats, LayoutStats]:
     """Search board orderings for a cheaper arrangement.
 
     Returns the chosen placements plus the stats before and after, so the
     caller can report what the search actually bought.
     """
+    def lay(items: list[Board]) -> list[Placement]:
+        return place(items, style, gap, columns, origin, max_width)
+
     order = list(range(len(boards)))
-    baseline = place([boards[i] for i in order], style, gap, columns)
+    baseline = lay([boards[i] for i in order])
     base_stats = _stats(baseline, boards, centroids)
 
     weight_air, weight_area = WEIGHTS.get(goal, WEIGHTS["balanced"])
@@ -299,7 +317,7 @@ def optimize(
             a, b = rng.sample(range(len(trial)), 2)
             trial[a], trial[b] = trial[b], trial[a]
 
-        candidate = place([boards[i] for i in trial], style, gap, columns)
+        candidate = lay([boards[i] for i in trial])
         stats = _stats(candidate, boards, centroids)
         if cost(stats) < best_cost - 1e-9:
             best_cost = cost(stats)
@@ -307,7 +325,7 @@ def optimize(
             best_stats = stats
             improved += 1
 
-    final = place([boards[i] for i in best_order], style, gap, columns)
+    final = lay([boards[i] for i in best_order])
     best_stats = _stats(final, boards, centroids)
     best_stats.iterations = steps
     best_stats.improved = improved
@@ -331,6 +349,35 @@ def _stats(placements: list[Placement], boards: list[Board],
 
 # A drawing is read on screen, so a wider-than-tall page beats a square one.
 SHEET_ASPECT = 1.6
+
+# What `--outline` gives you unless told otherwise: a plain rectangle big
+# enough for a handful of breakout boards and small enough to be cheap.
+DEFAULT_OUTLINE = "100x150"
+
+
+def keeps_source_outlines(text: str) -> bool:
+    """Whether the sub-boards' own outlines survive.
+
+    Only `keep` preserves them.  A size replaces them with one rectangle, and
+    `none` removes them without drawing a replacement, which is what you want
+    when the board shape is coming from somewhere else.
+    """
+    return text.strip().lower() in ("keep", "")
+
+
+def parse_outline(text: str) -> tuple[float, float] | None:
+    """Read `100x150` into millimetres. `keep` and `none` return None."""
+    cleaned = text.strip().lower().replace(" ", "")
+    if cleaned in ("keep", "none", ""):
+        return None
+    width, _, height = cleaned.partition("x")
+    try:
+        size = (float(width), float(height))
+    except ValueError as exc:
+        raise ValueError(f"outline should look like 100x150, not {text!r}") from exc
+    if size[0] <= 0 or size[1] <= 0:
+        raise ValueError(f"outline must be positive, not {text!r}")
+    return size
 
 
 def sheet_tiles(sizes: list[tuple[str, float, float]], per_sheet: int,

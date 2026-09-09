@@ -107,6 +107,7 @@ class MergePlan:
     drops: list[str] = field(default_factory=list)
     layout: str = "pack"
     optimize: str = "balanced"
+    outline: str = "100x150"
     gap: float = 5.0
     columns: int = 0
     sheet_layout: str = "per-design"
@@ -130,6 +131,7 @@ class MergePlan:
             drops=list(data.get("drops", [])),
             layout=data.get("layout", "pack"),
             optimize=data.get("optimize", "balanced"),
+            outline=data.get("outline", "100x150"),
             gap=float(data.get("gap", 5.0)),
             columns=int(data.get("columns", 0)),
             sheet_layout=data.get("sheet_layout", "per-design"),
@@ -227,6 +229,7 @@ def plan_from_resolver(
     drops: list[str] | None = None,
     layout: str = "pack",
     optimize: str = "balanced",
+    outline: str = "100x150",
     gap: float = 5.0,
     columns: int = 0,
     sheet_layout: str = "per-design",
@@ -270,7 +273,7 @@ def plan_from_resolver(
     return MergePlan(
         output=output, title=title, designs=designs, nets=nets, links=links,
         connections=connections, drops=list(drops or []),
-        layout=layout, optimize=optimize, gap=gap, columns=columns,
+        layout=layout, optimize=optimize, outline=outline, gap=gap, columns=columns,
         sheet_layout=sheet_layout, sheets_per_page=sheets_per_page,
     )
 

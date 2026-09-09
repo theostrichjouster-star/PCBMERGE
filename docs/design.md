@@ -164,6 +164,26 @@ Translation is applied only to board-level geometry: `plain`, `elements` and
 `signals`. Library packages use local coordinates relative to their own origin and
 must never be shifted, or every footprint in the file would deform.
 
+### Layer tables
+
+Each output file takes its layers from documents of its own kind. This is not a
+detail: a schematic writes the copper layers as `visible="no" active="no"` because
+it never draws on them, so a board built from the schematic's table opens with
+every footprint invisible and every layer locked. An early version pooled both and
+produced exactly that.
+
+### The outline
+
+The merged board draws one rectangle on layer 20 and discards the sub-boards' own
+dimension geometry, since eight overlapping outlines are not a board shape.
+Placement then runs with the outline's width as a packing constraint and its
+top-left as the origin, so the boards land inside the shape that will be made.
+A board too wide for the outline is still placed rather than dropped, and the
+overflow is reported with the size actually needed.
+
+`keep` is the only value that preserves the source outlines. A size replaces them,
+and `none` removes them without drawing a replacement.
+
 ### Packing and search
 
 `_shelf()` packs boards into rows sized to their tallest member, targeting a roughly
@@ -216,6 +236,10 @@ worse than showing the work that remains.
 `tests/conftest.py` builds small synthetic EAGLE designs that clash deliberately:
 same part names, same library names with different pad geometry, and a net set
 covering every bucket. Those tests run in milliseconds and pin the behaviour.
+
+`tests/test_board_output.py` pins the things EAGLE checks and Python cannot: that
+the board's copper layers are switched on, that the two files do not share one
+layer table, and that the outline is drawn once with the boards inside it.
 
 `tests/test_layout.py` checks that no arrangement style ever overlaps two boards,
 that packing beats uniform cells on mixed sizes, and that the optimizer shortens
