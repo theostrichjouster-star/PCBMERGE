@@ -95,12 +95,19 @@ class MergeReport:
     brd_path: Path | None = None
 
 
-def load_designs(instances: list[InstanceSpec]) -> list[Design]:
-    """Load each instance, parsing every source file only once."""
-    cache: dict[str, EagleDoc] = {}
+def load_designs(instances: list[InstanceSpec],
+                 cache: dict[str, EagleDoc] | None = None) -> list[Design]:
+    """Load each instance, parsing every source file only once.
+
+    Pass a `cache` to keep parsed documents between calls.  A long-running
+    caller re-analysing the same designs after every edit would otherwise
+    re-read several megabytes of XML each time.
+    """
+    if cache is None:
+        cache = {}
 
     def get(path: Path, kind: str) -> EagleDoc:
-        key = str(path)
+        key = f"{path}|{path.stat().st_mtime_ns}"
         doc = cache.get(key)
         if doc is None:
             doc = EagleDoc.load(path)
@@ -503,6 +510,38 @@ class Merger:
         node.text = text
         node.tail = "\n"
         return node
+
+    # -- preview ------------------------------------------------------------
+    def preview(self) -> dict:
+        """Where the boards would land, and what would still need routing.
+
+        Runs the same placement the board build runs, but stops before any
+        XML is produced, so a caller can show the arrangement and let someone
+        change their mind cheaply.
+        """
+        boards = [d for d in self.designs if d.brd is not None]
+        self.report.outline = layout.parse_outline(self.plan.outline)
+        if not boards:
+            return {"outline": self.report.outline, "placements": [], "airwires": []}
+
+        placements = self._place(boards)
+        offsets = {p.design: p for p in placements}
+
+        points: dict[str, list[dict]] = {}
+        for design in boards:
+            place = offsets[design.name]
+            for net, (x, y) in self._net_centroids(design).items():
+                points.setdefault(net, []).append(
+                    {"design": design.name, "x": x + place.dx, "y": y + place.dy})
+
+        airwires = [{"net": net, "points": spots}
+                    for net, spots in points.items() if len(spots) > 1]
+        airwires.sort(key=lambda a: -len(a["points"]))
+        return {
+            "outline": self.report.outline,
+            "placements": placements,
+            "airwires": airwires,
+        }
 
     # -- board --------------------------------------------------------------
     def build_board(self) -> EagleDoc | None:

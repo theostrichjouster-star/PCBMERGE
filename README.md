@@ -18,6 +18,41 @@ Place several copies of a design by appending `*N`:
 pcbmerge merge controller.sch relay.sch*4 -o farm --out-dir out
 ```
 
+## The visual front end
+
+The command line makes you decide before you can see anything. `pcbmerge web`
+serves the same engine over HTTP so you can decide against a picture:
+
+```bash
+pcbmerge web examples/adafruit
+```
+
+That opens a browser on `127.0.0.1:8765` showing the merged board as it would be
+built: the outline, every source board packed inside it, and a copper line for
+each net that still needs routing. Change anything on the left and the picture
+redraws.
+
+- **Designs** tick designs in or out and set how many copies of each
+- **Board** outline, gap, tiling and what the placement search optimises for
+- **Parts to leave out** every kind of part with its copy count, the ones nothing
+  is wired to starred, and one button to drop all of them
+- **Nets** what joined automatically, what needs a decision with a join/split
+  toggle, and the pairs that look like the same wire under different names
+- **Connections** wire one design's net to another's
+- **Write files** name, folder, and the Merge button
+
+Hovering a net highlights its airwires on the board; hovering a board names it.
+The numbers across the top are live, so the cost of a choice is visible before
+you commit to it. Joining the I2C bus on the eight sample designs takes the
+airwire total from 425 mm to 556 mm, which is the sort of thing worth seeing
+while you decide rather than afterwards.
+
+Nothing is written until you press Merge. Everything else only reads.
+
+The server binds to the loopback address and reads and writes files as you, which
+is right for a tool you start yourself and wrong for anything exposed to a
+network. It needs no internet connection and loads nothing from a CDN.
+
 ## The problem it solves
 
 Dropping two EAGLE designs into one file breaks in four separate ways at once.
@@ -391,6 +426,14 @@ A plan also carries copy counts, hand-made links, and the layout settings:
 }
 ```
 
+### web
+
+Open the visual front end described above.
+
+```bash
+pcbmerge web [folder] [--port 8765] [--no-browser]
+```
+
 ### parts
 
 List every part, grouped by kind so a decision covers all its copies at once.
@@ -455,6 +498,8 @@ That puts a `pcbmerge` command on your PATH. Check it with:
 ```bash
 pcbmerge --version
 ```
+
+If you would rather click than type, `pcbmerge web` opens the visual front end.
 
 Run the tests with `pip install -e ".[dev]"` then `pytest`.
 

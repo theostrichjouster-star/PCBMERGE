@@ -447,6 +447,19 @@ def _print_report(report, b: str, d: str, o: str) -> None:
           f"between the sub-boards.{o}")
 
 
+def cmd_web(args: argparse.Namespace) -> int:
+    """Open the visual front end in a browser."""
+    from . import web
+
+    start = ""
+    if args.inputs:
+        first = Path(args.inputs[0])
+        start = str(first if first.is_dir() else first.parent)
+    web.serve(port=args.port, open_browser=not args.no_browser,
+              verbose=args.verbose, start=start)
+    return 0
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     """Verify a .sch/.brd pair is internally consistent.
 
@@ -650,6 +663,17 @@ def build_parser() -> argparse.ArgumentParser:
     parts.add_argument("--all", action="store_true",
                        help="show every kind, not just the top 30")
     parts.set_defaults(func=cmd_parts)
+
+    site = subparsers.add_parser(
+        "web", help="open a visual front end in your browser")
+    site.add_argument("inputs", nargs="*",
+                      help="folder to open on start (optional)")
+    site.add_argument("--port", type=int, default=8765)
+    site.add_argument("--no-browser", action="store_true",
+                      help="do not open a browser window")
+    site.add_argument("-v", "--verbose", action="store_true",
+                      help="log every request")
+    site.set_defaults(func=cmd_web)
 
     checker = subparsers.add_parser("check", help="verify a .sch/.brd pair is consistent")
     checker.add_argument("design", help="a .sch, .brd, or shared stem")

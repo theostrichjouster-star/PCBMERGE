@@ -18,7 +18,9 @@ you route.
 | `plan.py` | Serialise every decision to JSON so a merge is replayable. |
 | `prompt.py` | Ask about copies, replicas, contested nets and links. |
 | `merge.py` | Apply the maps and build the two output documents. |
-| `cli.py` | `inspect`, `plan`, `merge`, `check`. |
+| `cli.py` | `inspect`, `parts`, `plan`, `merge`, `check`, `web`. |
+| `web.py` | A loopback HTTP server exposing the engine to the browser. |
+| `static/app.html` | The whole front end: one file, no dependencies. |
 
 ## Designs and instances
 
@@ -234,11 +236,44 @@ That is the intended output: the airwires are precisely the list of connections 
 engineer still has to make, and inventing a route across a board boundary would be
 worse than showing the work that remains.
 
+## The front end
+
+`web.py` is a thin layer. It owns no merge logic of its own: every request builds
+the same `Merger` the command line builds, and the page is redrawn from whatever
+that produces. The alternative, a second implementation of the rules in
+JavaScript, would drift from the engine within a week.
+
+Three endpoints do the work. `scan` lists the designs in a folder. `analyze`
+rebuilds everything from the decisions the page is holding and returns what to
+draw. `merge` is the only one that touches the disk.
+
+`analyze` is called after every edit, so it has to be cheap. Two things make it
+so. Parsed documents live in a module-level cache keyed by path and mtime, since
+re-reading seven megabytes of XML per keystroke would make the page feel broken.
+And `Merger.preview()` runs the real placement but stops before any XML is
+produced, so looking costs a fraction of committing.
+
+The page holds all the state and sends it whole with each request, which keeps
+the server stateless and means a reload cannot leave the two disagreeing. Requests
+carry a sequence number and stale replies are dropped, so a slow analyse cannot
+overwrite a newer one.
+
+The board picture is plain SVG built in JavaScript. Millimetres are y-up and
+screens are y-down, so points are transformed in code rather than with an SVG
+flip, which would mirror every label. Boards too small to hold their name are
+drawn without one: labelling regardless turns a crowded arrangement into a pile
+of overlapping text.
+
 ## Testing
 
 `tests/conftest.py` builds small synthetic EAGLE designs that clash deliberately:
 same part names, same library names with different pad geometry, and a net set
 covering every bucket. Those tests run in milliseconds and pin the behaviour.
+
+`tests/test_web.py` drives the API directly rather than through HTTP, which keeps
+it fast and keeps the assertions about behaviour rather than transport. It pins
+that analysing writes nothing, that the cache survives repeated calls but notices
+an edited file, and that what the page previews is what the merge writes.
 
 `tests/test_board_output.py` pins the things EAGLE checks and Python cannot: that
 the board's copper layers are switched on, that the two files do not share one

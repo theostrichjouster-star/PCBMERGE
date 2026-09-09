@@ -7,7 +7,7 @@ from .nets import Action, Kind, NetResolver
 from .plan import ConnectDecision, DesignSpec, InstanceSpec, MergePlan, expand
 from .pruning import DropRule, PartGroup, PartRef, catalog
 
-__version__ = "0.3.2"
+__version__ = "0.4.0"
 
 __all__ = [
     "Action", "ConnectDecision", "Design", "DesignSpec", "DropRule", "EagleDoc",
