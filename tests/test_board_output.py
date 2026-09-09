@@ -71,20 +71,20 @@ def test_a_default_outline_is_drawn(merged):
     assert len(wires) == 4, "a rectangle is four wires"
 
 
-def test_the_default_outline_is_100_by_150(merged):
+def test_the_default_outline_is_150_by_100(merged):
     brd, _ = merged
     xs = [float(w.get(a)) for w in outline_wires(brd) for a in ("x1", "x2")]
     ys = [float(w.get(a)) for w in outline_wires(brd) for a in ("y1", "y2")]
-    assert (min(xs), max(xs)) == (0.0, 100.0)
-    assert (min(ys), max(ys)) == (0.0, 150.0)
+    assert (min(xs), max(xs)) == (0.0, 150.0)
+    assert (min(ys), max(ys)) == (0.0, 100.0)
 
 
 def test_the_boards_land_inside_the_outline(merged):
     brd, _ = merged
     for element in brd.elements():
         x, y = float(element.get("x")), float(element.get("y"))
-        assert 0 <= x <= 100, f"{element.get('name')} is outside the outline"
-        assert 0 <= y <= 150, f"{element.get('name')} is outside the outline"
+        assert 0 <= x <= 150, f"{element.get('name')} is outside the outline"
+        assert 0 <= y <= 100, f"{element.get('name')} is outside the outline"
 
 
 def test_the_source_outlines_are_replaced_not_stacked(designs, tmp_path):
@@ -137,6 +137,7 @@ def test_an_outline_still_leaves_a_consistent_pair(designs, tmp_path):
 # -- parsing ---------------------------------------------------------------
 
 @pytest.mark.parametrize("text,expected", [
+    ("150x100", (150.0, 100.0)),
     ("100x150", (100.0, 150.0)),
     ("80 X 60", (80.0, 60.0)),
     ("21.5x34", (21.5, 34.0)),
@@ -157,7 +158,14 @@ def test_nonsense_sizes_are_refused(text):
 
 
 def test_the_default_is_the_documented_one():
-    assert parse_outline(layout.DEFAULT_OUTLINE) == (100.0, 150.0)
+    assert parse_outline(layout.DEFAULT_OUTLINE) == (150.0, 100.0)
+
+
+def test_the_default_is_stated_in_exactly_one_place():
+    """plan.py must not carry its own copy to drift out of step."""
+    from pcbmerge.plan import MergePlan
+
+    assert MergePlan().outline == layout.DEFAULT_OUTLINE
 
 
 # -- packing to a width ----------------------------------------------------

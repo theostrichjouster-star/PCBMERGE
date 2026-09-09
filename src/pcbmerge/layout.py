@@ -352,7 +352,9 @@ SHEET_ASPECT = 1.6
 
 # What `--outline` gives you unless told otherwise: a plain rectangle big
 # enough for a handful of breakout boards and small enough to be cheap.
-DEFAULT_OUTLINE = "100x150"
+# Landscape, because the packer fills rows left to right before starting a
+# new one, so a wide board wastes less on a part-filled last row.
+DEFAULT_OUTLINE = "150x100"
 
 
 def keeps_source_outlines(text: str) -> bool:
@@ -366,7 +368,7 @@ def keeps_source_outlines(text: str) -> bool:
 
 
 def parse_outline(text: str) -> tuple[float, float] | None:
-    """Read `100x150` into millimetres. `keep` and `none` return None."""
+    """Read `150x100` into millimetres. `keep` and `none` return None."""
     cleaned = text.strip().lower().replace(" ", "")
     if cleaned in ("keep", "none", ""):
         return None
@@ -374,7 +376,7 @@ def parse_outline(text: str) -> tuple[float, float] | None:
     try:
         size = (float(width), float(height))
     except ValueError as exc:
-        raise ValueError(f"outline should look like 100x150, not {text!r}") from exc
+        raise ValueError(f"outline should look like 150x100, not {text!r}") from exc
     if size[0] <= 0 or size[1] <= 0:
         raise ValueError(f"outline must be positive, not {text!r}")
     return size

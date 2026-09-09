@@ -239,7 +239,7 @@ uniform cells.
 
 ## The board outline
 
-The merged board gets one plain rectangle on the Dimension layer, 100 by 150 mm
+The merged board gets one plain rectangle on the Dimension layer, 150 by 100 mm
 by default, and the sub-boards are packed to fit inside it. Each source board's
 own outline is discarded, because carrying eight of them over leaves a pile of
 overlapping rectangles rather than a board shape.
@@ -250,7 +250,7 @@ pcbmerge merge examples/adafruit --outline 80x100
 
 | Value | Result |
 | --- | --- |
-| `100x150` | one rectangle that size (default) |
+| `150x100` | one rectangle that size (default) |
 | any `WxH` | one rectangle of your dimensions |
 | `keep` | every source board's outline, carried over in place |
 | `none` | outlines removed, nothing drawn |
@@ -259,7 +259,7 @@ If the sub-boards do not fit, they are still placed and the overflow is reported
 with the size they actually need:
 
 ```
-the sub-boards need 55 x 333 mm and overflow the 100 x 150 mm outline;
+the sub-boards need 55 x 333 mm and overflow the 150 x 100 mm outline;
 give --outline a bigger size or move them by hand
 ```
 
@@ -343,7 +343,7 @@ Useful flags:
 - `--drop MOUNTINGHOLE` leave parts out; `--no-prune` skips the question
 - `--no-suggest` skip the differently-named-net questions
 - `--layout pack|grid|row|column` and `--optimize balanced|airwire|area|none`
-- `--outline 100x150`, or `keep` / `none`
+- `--outline 150x100`, or `keep` / `none`
 - `--sheet-layout per-design|packed|single` and `--sheets-per-page 4`
 - `--gap 5` and `--columns 3`
 - `--prefix LEFT --prefix RIGHT` choose reference-designator prefixes yourself
@@ -386,7 +386,7 @@ A plan also carries copy counts, hand-made links, and the layout settings:
   "drops": ["MOUNTINGHOLE", "FIDUCIAL"],
   "layout": "pack",
   "optimize": "balanced",
-  "outline": "100x150",
+  "outline": "150x100",
   "sheet_layout": "per-design"
 }
 ```

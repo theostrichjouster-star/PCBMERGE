@@ -568,7 +568,8 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_argument("--optimize", choices=tuple(layout.WEIGHTS), default="balanced",
                          help="what the placement search minimises (default: balanced)")
         sub.add_argument("--outline", default=layout.DEFAULT_OUTLINE,
-                         help="board outline in mm, e.g. 100x150 (default); "
+                         help=f"board outline in mm, default "
+                              f"{layout.DEFAULT_OUTLINE}; "
                               "'keep' preserves each source board's own outline, "
                               "'none' draws none")
         sub.add_argument("--gap", type=float, default=5.0,

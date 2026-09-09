@@ -184,6 +184,9 @@ overflow is reported with the size actually needed.
 `keep` is the only value that preserves the source outlines. A size replaces them,
 and `none` removes them without drawing a replacement.
 
+The default lives in `layout.DEFAULT_OUTLINE` and nowhere else; `plan.py` imports
+it rather than repeating the literal, so the two cannot drift apart.
+
 ### Packing and search
 
 `_shelf()` packs boards into rows sized to their tallest member, targeting a roughly

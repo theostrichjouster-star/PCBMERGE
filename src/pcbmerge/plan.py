@@ -14,6 +14,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
 from .eagle import sanitize_name
+from .layout import DEFAULT_OUTLINE
 from .nets import Action, Kind, NetResolver
 
 PLAN_VERSION = 3
@@ -107,7 +108,7 @@ class MergePlan:
     drops: list[str] = field(default_factory=list)
     layout: str = "pack"
     optimize: str = "balanced"
-    outline: str = "100x150"
+    outline: str = DEFAULT_OUTLINE
     gap: float = 5.0
     columns: int = 0
     sheet_layout: str = "per-design"
@@ -131,7 +132,7 @@ class MergePlan:
             drops=list(data.get("drops", [])),
             layout=data.get("layout", "pack"),
             optimize=data.get("optimize", "balanced"),
-            outline=data.get("outline", "100x150"),
+            outline=data.get("outline", DEFAULT_OUTLINE),
             gap=float(data.get("gap", 5.0)),
             columns=int(data.get("columns", 0)),
             sheet_layout=data.get("sheet_layout", "per-design"),
@@ -229,7 +230,7 @@ def plan_from_resolver(
     drops: list[str] | None = None,
     layout: str = "pack",
     optimize: str = "balanced",
-    outline: str = "100x150",
+    outline: str = DEFAULT_OUTLINE,
     gap: float = 5.0,
     columns: int = 0,
     sheet_layout: str = "per-design",
