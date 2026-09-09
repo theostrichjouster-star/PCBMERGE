@@ -243,9 +243,17 @@ the same `Merger` the command line builds, and the page is redrawn from whatever
 that produces. The alternative, a second implementation of the rules in
 JavaScript, would drift from the engine within a week.
 
-Three endpoints do the work. `scan` lists the designs in a folder. `analyze`
-rebuilds everything from the decisions the page is holding and returns what to
-draw. `merge` is the only one that touches the disk.
+Four endpoints do the work. `browse` opens a folder dialog. `scan` lists the
+designs in a folder. `analyze` rebuilds everything from the decisions the page is
+holding and returns what to draw. `merge` is the only one that touches the disk.
+
+The picker is the operating system's, not the browser's, because a page is never
+told where a chosen folder actually lives. It runs as a subprocess rather than in
+the handler: Tk dislikes worker threads, and a modal dialog on a request thread
+would hold the server for as long as someone left it open. Cancelling and timing
+out both come back as `{"cancelled": true}` rather than an error, since neither is
+a failure. `can_browse()` reports whether tkinter exists at all, and the page hides
+the button when it does not.
 
 `analyze` is called after every edit, so it has to be cheap. Two things make it
 so. Parsed documents live in a module-level cache keyed by path and mtime, since

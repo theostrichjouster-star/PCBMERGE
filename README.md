@@ -32,6 +32,12 @@ built: the outline, every source board packed inside it, and a copper line for
 each net that still needs routing. Change anything on the left and the picture
 redraws.
 
+**Choose folder** opens your operating system's own folder dialog. A browser will
+not tell a page where a chosen folder really lives, so the server opens the dialog
+instead, in a separate process: a modal window on a request thread would hold the
+server for as long as you left it open. You can still paste a path into the box
+beside it, which is the only way in on a machine with no display.
+
 - **Designs** tick designs in or out and set how many copies of each
 - **Board** outline, gap, tiling and what the placement search optimises for
 - **Parts to leave out** every kind of part with its copy count, the ones nothing

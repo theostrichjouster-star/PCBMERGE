@@ -46,15 +46,19 @@
   .brand span { color: var(--ink-faint); font-size: 11px; font-family: var(--mono); }
   .grow { flex: 1; }
 
-  .path-box { display: flex; gap: 0; flex: 1; max-width: 620px; }
+  .path-box { display: flex; gap: 0; flex: 1; max-width: 700px; }
   .path-box input {
     flex: 1; padding: 7px 11px; background: var(--bg);
-    border: 1px solid var(--line); border-right: 0;
-    border-radius: var(--radius) 0 0 var(--radius);
-    font-family: var(--mono); font-size: 12px;
+    border: 1px solid var(--line); border-inline: 0;
+    border-radius: 0; font-family: var(--mono); font-size: 12px;
   }
   .path-box input:focus { outline: none; border-color: var(--blue); }
   .path-box button { border-radius: 0 var(--radius) var(--radius) 0; }
+  .path-box button.lead {
+    border-radius: var(--radius) 0 0 var(--radius); white-space: nowrap;
+    color: var(--ink);
+  }
+  .placeholder button { margin-top: 4px; justify-self: center; }
 
   button {
     padding: 7px 13px; background: var(--panel-2); color: var(--ink);
@@ -253,8 +257,9 @@
   <header>
     <div class="brand"><b>pcbmerge</b><span id="version"></span></div>
     <div class="path-box">
+      <button id="browse" class="lead" title="Pick a folder">Choose folder…</button>
       <input id="path" type="text" spellcheck="false"
-             placeholder="folder holding your .sch files">
+             placeholder="or paste a path to a folder of .sch files">
       <button id="scan">Open</button>
     </div>
     <div class="grow"></div>
@@ -359,7 +364,8 @@
       <div class="canvas-wrap" id="canvas-wrap">
         <div class="placeholder" id="placeholder">
           <b>No designs open</b>
-          <div>Paste a folder path above and press Open.</div>
+          <div>Choose the folder holding your .sch and .brd files.</div>
+          <button id="browse-big" class="primary">Choose folder…</button>
         </div>
         <svg id="canvas" style="display:none"></svg>
       </div>
@@ -478,25 +484,46 @@ async function analyze() {
 
 // ------------------------------------------------------------------ scanning
 
+function adopt(data) {
+  state.designs = data.designs;
+  state.drops = [];
+  state.connections = [];
+  state.links = [];
+  state.decisions = {};
+  $("path").value = data.folder;
+  showError("");
+  renderDesigns();
+  $("merge").disabled = false;
+}
+
 async function scan() {
   const path = $("path").value.trim();
-  if (!path) return;
+  if (!path) { browse(); return; }
   busy(true);
   try {
-    const data = await post("/api/scan", { path });
-    state.designs = data.designs;
-    state.drops = [];
-    state.connections = [];
-    state.links = [];
-    state.decisions = {};
-    $("path").value = data.folder;
-    showError("");
-    renderDesigns();
-    $("merge").disabled = false;
+    adopt(await post("/api/scan", { path }));
     await analyze();
   } catch (err) {
     showError(err.message);
     busy(false);
+  }
+}
+
+async function browse() {
+  // The dialog belongs to the machine, not the page, so it can sit open for
+  // as long as someone likes without anything here timing out.
+  busy(true);
+  $("browse").disabled = true;
+  try {
+    const data = await post("/api/browse", {});
+    if (data.cancelled) return;
+    adopt(data);
+    await analyze();
+  } catch (err) {
+    showError(err.message);
+  } finally {
+    $("browse").disabled = false;
+    if (!state.data) busy(false);
   }
 }
 
@@ -907,6 +934,8 @@ document.querySelectorAll("[data-toggle]").forEach((head) => {
   head.onclick = () => head.parentElement.classList.toggle("open");
 });
 $("scan").onclick = scan;
+$("browse").onclick = browse;
+$("browse-big").onclick = browse;
 $("path").onkeydown = (e) => { if (e.key === "Enter") scan(); };
 $("merge").onclick = runMerge;
 ["o-outline", "o-gap", "o-layout", "o-optimize", "o-sheet", "o-persheet"]
@@ -915,6 +944,12 @@ window.addEventListener("resize", () => { if (state.data) drawBoard(); });
 
 fetch("/api/health").then((r) => r.json()).then((d) => {
   if (d.version) $("version").textContent = d.version;
+  if (!d.canBrowse) {
+    // No dialog on this machine; pasting a path is the only way in.
+    $("browse").style.display = "none";
+    $("browse-big").style.display = "none";
+    $("path").placeholder = "paste a path to a folder of .sch files";
+  }
   if (d.start) { $("path").value = d.start; scan(); }
 });
 </script>

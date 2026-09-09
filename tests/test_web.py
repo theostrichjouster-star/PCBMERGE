@@ -253,3 +253,75 @@ def test_the_page_is_self_contained():
     for remote in ("http://", "https://"):
         assert f'src="{remote}' not in page
         assert f'href="{remote}' not in page
+
+
+# -- the folder picker -----------------------------------------------------
+
+class FakeRun:
+    """Stands in for the picker subprocess."""
+
+    def __init__(self, stdout="", returncode=0, stderr="", raises=None):
+        self.stdout, self.returncode, self.stderr = stdout, returncode, stderr
+        self.raises = raises
+        self.called_with = None
+
+    def __call__(self, cmd, **kwargs):
+        self.called_with = cmd
+        if self.raises:
+            raise self.raises
+        return self
+
+
+def test_the_picker_script_is_valid_python():
+    """It is run by a separate interpreter, so nothing else would catch a typo."""
+    compile(web.PICKER, "<picker>", "exec")
+
+
+def test_the_picker_runs_in_its_own_process(designs, monkeypatch):
+    """A modal dialog on a request thread would hold the server open."""
+    fake = FakeRun(stdout=str(designs))
+    monkeypatch.setattr(web.subprocess, "run", fake)
+    web.browse({})
+    assert fake.called_with[0] == web.sys.executable
+    assert fake.called_with[1] == "-c"
+
+
+def test_choosing_a_folder_scans_it(designs, monkeypatch):
+    monkeypatch.setattr(web.subprocess, "run", FakeRun(stdout=str(designs) + "\n"))
+    result = web.browse({})
+    assert len(result["designs"]) == 2
+    assert result["folder"] == str(designs)
+
+
+def test_cancelling_is_not_an_error(monkeypatch):
+    monkeypatch.setattr(web.subprocess, "run", FakeRun(stdout=""))
+    assert web.browse({}) == {"cancelled": True}
+
+
+def test_a_dialog_left_open_forever_gives_up_quietly(monkeypatch):
+    import subprocess as sp
+
+    monkeypatch.setattr(web.subprocess, "run",
+                        FakeRun(raises=sp.TimeoutExpired("picker", 1)))
+    assert web.browse({}) == {"cancelled": True}
+
+
+def test_a_failing_dialog_is_reported(monkeypatch):
+    monkeypatch.setattr(web.subprocess, "run",
+                        FakeRun(returncode=1, stderr="ModuleNotFoundError: no tkinter"))
+    with pytest.raises(ValueError, match="tkinter"):
+        web.browse({})
+
+
+def test_a_machine_without_a_dialog_says_so(monkeypatch):
+    monkeypatch.setattr(web, "can_browse", lambda: False)
+    with pytest.raises(ValueError, match="type or paste"):
+        web.browse({})
+
+
+def test_the_page_offers_the_picker_and_keeps_the_typed_path():
+    page = (web.STATIC / "app.html").read_text(encoding="utf-8")
+    assert 'id="browse"' in page
+    assert 'id="browse-big"' in page, "the empty state needs a way in too"
+    assert 'id="path"' in page, "pasting a path stays available"
+    assert "/api/browse" in page

@@ -12,7 +12,11 @@ yourself and would not be fine exposed to a network.
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import subprocess
+import sys
+import textwrap
 import threading
 import traceback
 import webbrowser
@@ -36,6 +40,29 @@ START: str = ""
 # Parsed documents survive between requests: re-reading several megabytes of
 # XML after every click would make the interface feel broken.
 _documents: dict[str, EagleDoc] = {}
+
+# A browser will not tell a page where a chosen folder really lives, so the
+# folder picker is the operating system's own, opened by the server.  It runs
+# in a separate process: a modal dialog on a request thread would hold the
+# server for as long as someone left it open, and Tk dislikes worker threads.
+PICKER = textwrap.dedent("""
+    import sys
+    import tkinter as tk
+    from tkinter import filedialog
+
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    chosen = filedialog.askdirectory(title="Choose a folder of EAGLE designs")
+    root.destroy()
+    sys.stdout.write(chosen or "")
+""")
+PICKER_TIMEOUT = 600
+
+
+def can_browse() -> bool:
+    """Whether this machine can show a folder dialog at all."""
+    return importlib.util.find_spec("tkinter") is not None
 
 
 # --------------------------------------------------------------------------
@@ -76,13 +103,15 @@ class Handler(BaseHTTPRequestHandler):
         elif route == "/api/health":
             from . import __version__
 
-            self._json({"ok": True, "version": __version__, "start": START})
+            self._json({"ok": True, "version": __version__, "start": START,
+                        "canBrowse": can_browse()})
         else:
             self._json({"error": "not found"}, 404)
 
     def do_POST(self) -> None:  # noqa: N802 - required name
         route = urlparse(self.path).path
         actions = {
+            "/api/browse": browse,
             "/api/scan": scan,
             "/api/analyze": analyze,
             "/api/merge": run_merge,
@@ -133,6 +162,30 @@ def scan(body: dict) -> dict:
             "use": True,
         })
     return {"folder": str(folder), "designs": designs}
+
+
+def browse(body: dict) -> dict:
+    """Ask the operating system for a folder, then scan whatever comes back."""
+    if not can_browse():
+        raise ValueError(
+            "no folder dialog on this machine; type or paste the path instead")
+    try:
+        done = subprocess.run(
+            [sys.executable, "-c", PICKER],
+            capture_output=True, text=True, timeout=PICKER_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return {"cancelled": True}
+    except OSError as exc:
+        raise ValueError(f"could not open a folder dialog: {exc}") from exc
+
+    if done.returncode != 0:
+        detail = (done.stderr or "").strip().splitlines()
+        raise ValueError(detail[-1] if detail else "the folder dialog failed")
+
+    chosen = done.stdout.strip()
+    if not chosen:
+        return {"cancelled": True}
+    return scan({"path": chosen})
 
 
 def _specs(body: dict) -> list[DesignSpec]:
