@@ -551,6 +551,10 @@ def build_parser() -> argparse.ArgumentParser:
                     "resolving net names automatically or by asking.",
     )
     parser.add_argument("--no-color", action="store_true", help="plain output")
+    from . import __version__
+
+    parser.add_argument("--version", action="version",
+                        version=f"pcbmerge {__version__}")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     def add_inputs(sub):

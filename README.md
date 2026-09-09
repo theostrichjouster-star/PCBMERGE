@@ -450,7 +450,37 @@ Python 3.10 or newer, no dependencies.
 pip install -e .
 ```
 
+That puts a `pcbmerge` command on your PATH. Check it with:
+
+```bash
+pcbmerge --version
+```
+
 Run the tests with `pip install -e ".[dev]"` then `pytest`.
+
+## A first run
+
+Start with `inspect`, which writes nothing and tells you what a merge would do:
+
+```bash
+pcbmerge inspect examples/adafruit
+```
+
+Then merge. Without `--yes` it asks about parts to drop, connections to make and
+contested nets; with it, everything takes the documented default:
+
+```bash
+pcbmerge merge examples/adafruit -o combo --out-dir out --yes
+```
+
+You get `out/combo.sch` and `out/combo.brd`. Open the board in EAGLE, run DRC, and
+the airwires you see are the joined nets waiting to be routed.
+
+To check the result without opening EAGLE:
+
+```bash
+pcbmerge check out/combo
+```
 
 ## Limitations
 
