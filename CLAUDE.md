@@ -192,6 +192,10 @@ to accommodate it.
 - **A downloaded design keeps one stem for both halves**, or the merge cannot find the
   board. Nothing from the repository is used as a path: the name is sanitised, only a
   known design extension survives, and a repeat download gets its own stem.
+- **An import lands in the open project folder**, which must already exist and have
+  been scanned. `import_designs` refuses a missing or unknown folder rather than
+  inventing one, and the page rescans with `absorb` rather than `adopt` so copy
+  counts, net decisions and hand placements survive adding a design.
 
 `SourceError` subclasses `EagleError` deliberately, so the CLI and the web front end
 report a network failure through the paths they already have.

@@ -203,9 +203,6 @@ def browse(body: dict) -> dict:
 # published designs
 # --------------------------------------------------------------------------
 
-DOWNLOADS = "downloads"
-
-
 def search(body: dict) -> dict:
     """Repositories in the vendor accounts matching what was typed."""
     query = (body.get("query") or "").strip()
@@ -254,17 +251,28 @@ def _design_json(design) -> dict:
 
 
 def import_designs(body: dict) -> dict:
-    """Download the chosen designs, then open the folder they landed in.
+    """Download the chosen designs into the open project folder.
+
+    They land beside the designs already being merged, because that folder is
+    what the merge reads; a separate downloads folder would only have to be
+    opened again afterwards.  So the folder has to exist and has to have been
+    opened: inventing one here would put files somewhere nobody asked for.
 
     The page sends back the same descriptions it was given, so nothing here
-    trusts a path: only the file extension survives into the name written, and
-    the destination is decided on this side.
+    trusts a path from the repository: only the file extension survives into
+    the name written, and the folder is one this server itself scanned.
     """
     chosen = [_remote(item) for item in body.get("designs") or []]
     if not chosen:
         raise ValueError("pick at least one design to import")
 
-    dest = Path((body.get("dest") or DOWNLOADS).strip()).expanduser()
+    raw = (body.get("dest") or "").strip().strip('"')
+    if not raw:
+        raise ValueError("open the project folder these should be saved into first")
+    dest = Path(raw).expanduser()
+    if not dest.is_dir():
+        raise ValueError(f"{dest} is not a folder that exists")
+
     written = sources.fetch_all(chosen, dest)
 
     result = scan({"path": str(dest)})

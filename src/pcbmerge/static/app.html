@@ -283,8 +283,19 @@
   .designs .row { padding: 3px 0; }
   .designs .row + .row { border-top: 0; }
   .designs .name { font-family: var(--mono); font-size: 11.5px; }
-  .import-bar { display: flex; gap: 7px; align-items: center; margin-top: 12px; }
-  .import-bar input { flex: 1; }
+  .import-bar { margin-top: 12px; }
+  .import-bar button { width: 100%; }
+  .import-bar .where {
+    display: block; margin-top: 5px; color: var(--ink-faint); font-size: 11px;
+    font-family: var(--mono); overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .ask {
+    margin-top: 12px; padding: 10px 11px; border-radius: var(--radius);
+    background: #f5e9e4; border: 1px solid rgba(178,60,9,.35);
+    font-size: 12px; color: #7a2c07;
+  }
+  .ask button { margin-top: 8px; }
   .chip.eagle { background: #e6eaf4; color: var(--blue); }
   .chip.kicad { background: #e8eee9; color: var(--green); }
   .chip.part { background: #f3e8e8; color: var(--maroon); }
@@ -423,9 +434,10 @@
           </div>
           <div id="results"><div class="empty">Nothing searched yet.</div></div>
           <div class="import-bar" id="import-bar" style="display:none">
-            <input id="dest" type="text" value="downloads" spellcheck="false">
             <button id="import" class="primary">Import</button>
+            <span class="where" id="dest"></span>
           </div>
+          <div class="ask" id="ask" style="display:none"></div>
         </div>
       </section>
 
@@ -561,6 +573,7 @@ const state = {
   connections: [],
   links: [],
   decisions: {},
+  folder: "",           // the project folder open, and where imports land
   positions: [],        // {design, view, x, y} for anything placed by hand
   view: "board",
   focus: null,          // design to hand focus back to after a redraw
@@ -666,7 +679,29 @@ function adopt(data) {
   state.links = [];
   state.decisions = {};
   state.positions = [];
+  state.folder = data.folder;
   $("path").value = data.folder;
+  showError("");
+  renderDesigns();
+  $("merge").disabled = false;
+  renderResults();
+}
+
+/** Take in a rescan of the folder already open, keeping what was set on it.
+
+    An import adds files to the folder being merged, so the folder has to be
+    read again.  Treating that as opening it afresh would throw away the copy
+    counts, the nets already decided and anything placed by hand, which is a
+    lot to lose for adding one design. */
+function absorb(data) {
+  if (data.folder !== state.folder) { adopt(data); return; }
+  const known = new Map(state.designs.map((d) => [d.sch, d]));
+  state.designs = data.designs.map((design) => {
+    const was = known.get(design.sch);
+    return was
+      ? { ...design, use: was.use, count: was.count, prefix: was.prefix }
+      : design;
+  });
   showError("");
   renderDesigns();
   $("merge").disabled = false;
@@ -822,9 +857,14 @@ function updateImportBar() {
   $("t-find").textContent = picked ? `${picked} picked`
     : `${online.repos.length} found`;
   $("t-find").className = picked ? "tally act" : "tally";
-  $("import-bar").style.display = picked ? "flex" : "none";
+  $("import-bar").style.display = picked ? "block" : "none";
   $("import").textContent = picked === 1 ? "Import 1 design"
     : `Import ${picked} designs`;
+  $("dest").textContent = state.folder
+    ? `into ${state.folder}`
+    : "choose a project folder first";
+  $("dest").title = state.folder || "";
+  if (state.folder) $("ask").style.display = "none";
 }
 
 function countLabel(repo) {
@@ -877,14 +917,16 @@ function designList(repo) {
 async function importChosen() {
   const chosen = [...online.chosen.values()];
   if (!chosen.length) return;
+  if (!state.folder) { askForFolder(); return; }
+
   busy(true);
   $("import").disabled = true;
   try {
     const data = await post("/api/import", {
       designs: chosen,
-      dest: $("dest").value.trim() || "downloads",
+      dest: state.folder,
     });
-    adopt(data);
+    absorb(data);
     online.chosen.clear();
     renderResults();
     $("sec-designs").classList.add("open");
@@ -894,6 +936,34 @@ async function importChosen() {
     busy(false);
   } finally {
     $("import").disabled = false;
+  }
+}
+
+/** Downloaded designs go into the folder being merged, so there has to be one.
+
+    Rather than picking a folder on someone's behalf, this says what is needed
+    and offers the same dialog the top of the page offers, then carries on with
+    the import they already asked for. */
+function askForFolder() {
+  const host = $("ask");
+  host.innerHTML = "";
+  host.style.display = "block";
+  host.append(el("div", null,
+    "Downloads are saved into the project folder you are merging, and none is "
+    + "open yet. Choose one and the import will continue."));
+  const pick = el("button", "primary", "Choose folder…");
+  pick.onclick = async () => {
+    await browse();
+    if (!state.folder) return;
+    host.style.display = "none";
+    importChosen();
+  };
+  host.append(pick);
+  if ($("browse").style.display === "none") {
+    // No dialog on this machine; pasting a path at the top is the only way in.
+    pick.remove();
+    host.append(el("div", "sub",
+      "Paste a path in the box at the top of the page."));
   }
 }
 
@@ -1576,6 +1646,11 @@ async function runMerge() {
 
 const PANEL = { min: 300, max: 760, start: 420, key: "pcbmerge.panel" };
 
+// What was asked for, before the window's size had its say.  A narrow window
+// clamps the panel; a wider one has to give the room back, so the request is
+// kept and applied again rather than the clamped result becoming the new want.
+let wantedPanel = PANEL.start;
+
 function panelWidth() {
   const raw = parseFloat(
     getComputedStyle($("app")).getPropertyValue("--panel-w"));
@@ -1583,6 +1658,7 @@ function panelWidth() {
 }
 
 function setPanelWidth(px, remember) {
+  wantedPanel = px;
   const room = Math.max(PANEL.min, Math.min(PANEL.max, window.innerWidth - 320));
   const width = Math.round(Math.max(PANEL.min, Math.min(room, px)));
   $("app").style.setProperty("--panel-w", `${width}px`);
@@ -1652,7 +1728,10 @@ $("path").onkeydown = (e) => { if (e.key === "Enter") scan(); };
 $("merge").onclick = runMerge;
 ["o-outline", "o-gap", "o-layout", "o-optimize"]
   .forEach((id) => { $(id).oninput = schedule; $(id).onchange = schedule; });
-window.addEventListener("resize", () => { if (state.data) drawStage(); });
+window.addEventListener("resize", () => {
+  setPanelWidth(wantedPanel, false);
+  if (state.data) drawStage();
+});
 [...$("views").children].forEach((button) => {
   button.onclick = () => setView(button.dataset.view);
 });

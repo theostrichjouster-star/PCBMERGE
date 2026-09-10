@@ -441,9 +441,9 @@ def test_the_repo_endpoint_needs_a_repository():
         web.repository({"repo": "   "})
 
 
-def test_importing_downloads_then_opens_the_folder(monkeypatch, tmp_path, designs):
-    # The two halves written are real EAGLE files, because the import scans the
-    # folder afterwards and hands the page something it can merge.
+def test_importing_downloads_then_opens_the_folder(monkeypatch, designs):
+    # Downloads land in the project folder being merged, beside the designs
+    # already there, because that folder is what the merge reads.
     source = sorted(designs.glob("*.sch"))[0]
     payload = {".sch": source.read_bytes(),
                ".brd": source.with_suffix(".brd").read_bytes()}
@@ -452,10 +452,9 @@ def test_importing_downloads_then_opens_the_folder(monkeypatch, tmp_path, design
         return payload[".brd"] if url.endswith(".brd") else payload[".sch"]
 
     monkeypatch.setattr(sources, "_request", answer)
-    dest = tmp_path / "downloads"
 
     out = web.import_designs({
-        "dest": str(dest),
+        "dest": str(designs),
         "designs": [{
             "repo": "adafruit/A1", "name": "Imported", "folder": "", "tool": "eagle",
             "branch": "master", "files": {".sch": "x.sch", ".brd": "x.brd"},
@@ -463,13 +462,41 @@ def test_importing_downloads_then_opens_the_folder(monkeypatch, tmp_path, design
     })
 
     assert sorted(out["imported"]) == ["Imported.brd", "Imported.sch"]
-    assert [d["name"] for d in out["designs"]] == ["Imported"]
-    assert out["folder"] == str(dest)
+    assert "Imported" in [d["name"] for d in out["designs"]]
+    assert out["folder"] == str(designs)
 
 
 def test_importing_nothing_is_refused():
     with pytest.raises(ValueError, match="at least one"):
         web.import_designs({"designs": []})
+
+
+def one_design() -> list[dict]:
+    return [{"repo": "adafruit/A1", "name": "Imported", "folder": "",
+             "tool": "eagle", "branch": "master", "files": {".sch": "x.sch"}}]
+
+
+def test_importing_with_nowhere_to_put_it_is_refused():
+    """Inventing a folder would put files somewhere nobody asked for."""
+    with pytest.raises(ValueError, match="open the project folder"):
+        web.import_designs({"designs": one_design(), "dest": "   "})
+
+
+def test_importing_into_a_folder_that_is_not_there_is_refused(tmp_path):
+    with pytest.raises(ValueError, match="not a folder"):
+        web.import_designs({"designs": one_design(),
+                            "dest": str(tmp_path / "nope")})
+
+
+def test_an_import_lands_beside_the_designs_already_open(monkeypatch, designs):
+    before = {p.name for p in designs.iterdir()}
+    source = sorted(designs.glob("*.sch"))[0]
+    monkeypatch.setattr(sources, "_request",
+                        lambda url, accept="": source.read_bytes())
+
+    web.import_designs({"dest": str(designs), "designs": one_design()})
+
+    assert {p.name for p in designs.iterdir()} - before == {"Imported.sch"}
 
 
 def test_an_imported_design_must_name_its_files():

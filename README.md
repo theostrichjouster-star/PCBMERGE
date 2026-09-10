@@ -39,6 +39,8 @@ instead, in a separate process: a modal window on a request thread would hold th
 server for as long as you left it open. You can still paste a path into the box
 beside it, which is the only way in on a machine with no display.
 
+- **Find designs online** search Adafruit, SparkFun and Seeed Studio, and save
+  what you pick into the folder you have open
 - **Designs** tick designs in or out and set how many copies of each
 - **Board** outline, gap, tiling and what the placement search optimises for
 - **Parts to leave out** every kind of part with its copy count, the ones nothing
@@ -154,8 +156,12 @@ as a path: only the extension survives, and a second copy of the same design get
 its own stem rather than overwriting the first.
 
 The front end has the same thing as a panel. Tick the vendors, type a search, open a
-result to see its designs, and importing downloads them and opens the folder ready
-to merge, without leaving the page.
+result to see its designs, and importing saves them **into the project folder you
+have open**, beside the designs already there. They appear in the Designs list
+straight away, and what you had already set on the other designs is kept.
+
+So a folder has to be open first. Import with none open and the panel says so and
+offers the folder dialog; choose one and the import carries on.
 
 ### Rate limits
 
