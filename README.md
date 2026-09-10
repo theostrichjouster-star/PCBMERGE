@@ -799,4 +799,4 @@ MIT, in `LICENSE`.
 The designs in `examples/basic` are not covered by it. They are hardware
 published by Adafruit and SparkFun, included so the tool can be tried against
 real files rather than something written to suit it, and they carry their own
-terms. `LICENSE` says where each came from.
+terms. `examples/basic/README.md` says where each came from.
