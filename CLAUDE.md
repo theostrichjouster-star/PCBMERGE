@@ -206,9 +206,14 @@ to accommodate it.
   rather than the submodule.
 - **One search per vendor, interleaved.** Several `org:` qualifiers in one query let
   the ranking fill the page with a single account.
-- **Hardware is ranked above software.** Searching a part number finds the driver
-  library long before the board. `hardware_rank` reorders each account's results; it
-  never hides anything.
+- **A name that answers the query is opened first**, then hardware above software.
+  `rank()` puts the two together. An account holds the board, its library and its
+  hookup guide, all mentioning the part, so without the name test the budget goes on
+  the writing about the board rather than the board. Ranking only reorders; it never
+  hides anything.
+- **Design files are usually in a subfolder** (`Hardware/` is the common one). The
+  whole tree is read, so nothing depends on where they are or what the folder is
+  called.
 - **A result is a design, not a repository.** Repository search matches names and
   descriptions, never file contents, so it both returns repositories with no hardware
   and misses hardware in a repository named after something else. Every candidate is

@@ -141,10 +141,16 @@ nothing about XIAO, so no search for the part would ever have reached them. Each
 vendor's catalogue repositories are listed and always looked in, matched by the
 names of the designs they hold rather than the name of the repository.
 
+Design files usually sit in a subfolder rather than at the top of a repository, a
+`Hardware` folder being the common one, and the whole repository is read so it makes
+no difference where they are or what the folder is called.
+
 Results come back a row at a time from each account, so one vendor cannot crowd out
-the others, and hardware is pulled above software before anything is opened.
-Searching a part number otherwise returns the driver library long before the board
-it drives, because that is what people star and link to.
+the others. Within an account, a repository whose own name answers the query is
+opened first, and hardware is pulled above software after that. An account holds the
+board, its Arduino library and its hookup guide, and all three mention the part, so
+the board has to be picked out by its name or the budget goes on the writing about
+it.
 
 `--vendor` narrows the search to one account, and `--tool` to one of the two
 formats. A vendor that has ported a board keeps the EAGLE pair and the KiCad

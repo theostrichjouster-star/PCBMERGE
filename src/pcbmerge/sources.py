@@ -349,8 +349,32 @@ def _search_org(query: str, org: str, per_page: int) -> list[Repo]:
     url = f"{API}/search/repositories?{urllib.parse.urlencode(params)}"
     payload = _get_json(url)
     found = [_repo(item) for item in payload.get("items", []) if isinstance(item, dict)]
-    found.sort(key=hardware_rank, reverse=True)
+    found.sort(key=lambda repo: rank(repo, query), reverse=True)
     return found[:per_page]
+
+
+def rank(repo: Repo, query: str) -> tuple[int, int]:
+    """How worth opening a repository is, best first.
+
+    A name that answers the query comes before anything else, because the
+    board someone asked for is nearly always named after it and the account
+    also holds a library, a hookup guide and an example sketch with the same
+    words in the description.  Only then does hardware sort above software.
+    """
+    return (_named(repo, query), hardware_rank(repo))
+
+
+def _named(repo: Repo, query: str) -> int:
+    """How many of the query's words are in the repository's own name."""
+    words = _words(query)
+    if not words:
+        return 0
+    name = " ".join(_words(repo.name))
+    return sum(1 for word in words if word in name.split() or word in repo.name.lower())
+
+
+def _words(text: str) -> list[str]:
+    return [w for w in re.split(r"[^a-z0-9]+", (text or "").lower()) if w]
 
 
 # Searching for a part number finds the driver library long before the board
@@ -367,12 +391,9 @@ SOFTWARE_WORDS = (
     "tutorial", "learn", "node", "javascript",
 )
 
-WORD = re.compile(r"[a-z0-9]+")
-
-
 def hardware_rank(repo: Repo) -> int:
     """How much a repository looks like published hardware rather than code."""
-    words = set(WORD.findall(f"{repo.name} {repo.description}".lower()))
+    words = set(_words(f"{repo.name} {repo.description}"))
     return (sum(word in words for word in HARDWARE_WORDS)
             - sum(word in words for word in SOFTWARE_WORDS))
 

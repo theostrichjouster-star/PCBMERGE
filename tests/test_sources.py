@@ -102,6 +102,47 @@ def test_search_honours_a_chosen_vendor(monkeypatch):
     assert [r.full_name for r in found.repos] == ["sparkfun/S1"]
 
 
+def test_a_name_that_answers_the_query_is_opened_first(monkeypatch):
+    """An account holds the board, its library and its hookup guide.
+
+    All three mention the part, so the board has to be picked out by its own
+    name or the budget is spent on the writing about it.
+    """
+    query = "pro micro esp32c3"
+    board = sources.Repo("sparkfun", "SparkFun_Pro_Micro-ESP32C3",
+                         "Pro Micro ESP32-C3")
+    guide = sources.Repo("sparkfun", "SparkFun_Pro_Micro_Hookup_Guide",
+                         "Hookup guide for the Pro Micro ESP32C3")
+    library = sources.Repo("sparkfun", "SparkFun_Qwiic_Arduino_Library",
+                           "Arduino library for the Pro Micro ESP32C3")
+
+    order = sorted([library, guide, board],
+                   key=lambda r: sources.rank(r, query), reverse=True)
+
+    assert [r.name for r in order][0] == "SparkFun_Pro_Micro-ESP32C3"
+
+
+def test_hardware_still_beats_software_when_neither_is_named(monkeypatch):
+    pcb = sources.Repo("adafruit", "Widget-PCB", "PCB files for the widget")
+    lib = sources.Repo("adafruit", "Widget_Library", "Arduino library")
+
+    assert sources.rank(pcb, "") > sources.rank(lib, "")
+
+
+def test_a_design_nested_in_a_hardware_folder_is_found(monkeypatch):
+    """Vendors keep the design files in a subfolder, not at the top."""
+    fake_github(monkeypatch, {"git/trees": tree(
+        "README.md", "Firmware/main.c",
+        "Hardware/SparkFun_Dev_ESP32_C3_MINI.sch",
+        "Hardware/SparkFun_Dev_ESP32_C3_MINI.brd")})
+
+    found = sources.designs("sparkfun/SparkFun_Pro_Micro-ESP32C3", "main")
+
+    assert [(d.folder, d.name) for d in found] == [
+        ("Hardware", "SparkFun_Dev_ESP32_C3_MINI")]
+    assert found[0].complete
+
+
 def test_a_repository_with_no_designs_is_not_a_result(monkeypatch):
     """A name that matches and no hardware behind it is not worth showing."""
     fake_github(monkeypatch, {
