@@ -77,29 +77,158 @@ def test_search_takes_a_turn_from_each_vendor(monkeypatch):
         "org%3Aadafruit": {"items": [repo_item("adafruit", "A1"), repo_item("adafruit", "A2")]},
         "org%3Asparkfun": {"items": [repo_item("sparkfun", "S1")]},
         "org%3ASeeed-Studio": {"items": [repo_item("Seeed-Studio", "Z1")]},
+        "repos/Seeed-Studio/OPL_Kicad_Library": repo_item("Seeed-Studio",
+                                                          "OPL_Kicad_Library"),
+        "git/trees": PAIR,
     })
 
-    found = sources.search("bme280")
+    found = sources.search("board")
 
-    # One from each account before a second from any: no vendor crowds the rest out.
-    assert [r.full_name for r in found] == [
-        "adafruit/A1", "sparkfun/S1", "Seeed-Studio/Z1", "adafruit/A2"]
+    # One from each account before a second from any: no vendor crowds the rest
+    # out.  Seeed's catalogue is always looked in, so it leads that account.
+    assert [r.full_name for r in found.repos] == [
+        "adafruit/A1", "sparkfun/S1", "Seeed-Studio/OPL_Kicad_Library",
+        "adafruit/A2", "Seeed-Studio/Z1"]
 
 
 def test_search_honours_a_chosen_vendor(monkeypatch):
-    seen = fake_github(monkeypatch, {"org%3Asparkfun": {"items": [repo_item("sparkfun", "S1")]}})
+    fake_github(monkeypatch, {
+        "org%3Asparkfun": {"items": [repo_item("sparkfun", "S1")]},
+        "git/trees": PAIR,
+    })
 
     found = sources.search("qwiic", orgs=["sparkfun"])
 
-    assert [r.full_name for r in found] == ["sparkfun/S1"]
+    assert [r.full_name for r in found.repos] == ["sparkfun/S1"]
+
+
+def test_a_repository_with_no_designs_is_not_a_result(monkeypatch):
+    """A name that matches and no hardware behind it is not worth showing."""
+    fake_github(monkeypatch, {
+        "org%3Aadafruit": {"items": [repo_item("adafruit", "A1"),
+                                     repo_item("adafruit", "A2")]},
+        "repos/adafruit/A1/git/trees": tree("README.md", "src/main.c"),
+        "repos/adafruit/A2/git/trees": PAIR,
+    })
+
+    found = sources.search("thing", orgs=["adafruit"])
+
+    assert [r.full_name for r in found.repos] == ["adafruit/A2"]
+    assert found.inspected == 2
+
+
+def test_a_result_arrives_with_its_designs_already(monkeypatch):
+    fake_github(monkeypatch, {
+        "org%3Aadafruit": {"items": [repo_item("adafruit", "A1")]},
+        "git/trees": PAIR,
+    })
+
+    found = sources.search("board", orgs=["adafruit"])
+
+    assert [d.name for d in found.repos[0].designs] == ["board"]
+
+
+def test_a_catalogue_is_opened_even_when_its_name_says_nothing(monkeypatch):
+    """Repository search reads a name and a description, never the files."""
+    fake_github(monkeypatch, {
+        "org%3ASeeed-Studio": {"items": []},
+        "repos/Seeed-Studio/OPL_Kicad_Library": repo_item("Seeed-Studio",
+                                                          "OPL_Kicad_Library"),
+        "git/trees": tree("XIAO Family/XIAO.kicad_pcb", "XIAO Family/XIAO.kicad_sch",
+                          "Other/Widget.kicad_pcb"),
+    })
+
+    found = sources.search("xiao", orgs=["Seeed-Studio"])
+
+    assert [r.full_name for r in found.repos] == ["Seeed-Studio/OPL_Kicad_Library"]
+    # Only the designs that answer the query, or a catalogue answers everything.
+    assert [d.name for d in found.repos[0].designs] == ["XIAO"]
+
+
+def test_a_catalogue_with_nothing_matching_is_dropped(monkeypatch):
+    fake_github(monkeypatch, {
+        "org%3ASeeed-Studio": {"items": []},
+        "repos/Seeed-Studio/OPL_Kicad_Library": repo_item("Seeed-Studio",
+                                                          "OPL_Kicad_Library"),
+        "git/trees": tree("Other/Widget.kicad_pcb"),
+    })
+
+    assert sources.search("xiao", orgs=["Seeed-Studio"]).repos == []
+
+
+def test_opening_repositories_can_be_skipped(monkeypatch):
+    """The cheap path: one request per vendor, and no filtering."""
+    seen = fake_github(monkeypatch, {
+        "org%3Aadafruit": {"items": [repo_item("adafruit", "A1")]}})
+
+    found = sources.search("x", orgs=["adafruit"], inspect=False)
+
+    assert [r.full_name for r in found.repos] == ["adafruit/A1"]
+    assert found.inspected == 0
     assert len(seen) == 1
 
 
-def test_search_stops_at_the_limit(monkeypatch):
-    fake_github(monkeypatch, {"org%3Aadafruit": {
-        "items": [repo_item("adafruit", f"A{n}") for n in range(20)]}})
+def test_the_search_looks_past_the_first_few_names(monkeypatch):
+    """Only the last of these holds hardware, and it still has to be found.
 
-    assert len(sources.search("", orgs=["adafruit"], limit=4)) == 4
+    Offering the inspection only as many candidates as there are results to
+    show starves it: the first names a vendor returns are usually libraries,
+    and a search that can open nothing else reports the vendor has nothing.
+    """
+    items = [repo_item("sparkfun", f"Lib{n}") for n in range(9)]
+    items.append(repo_item("sparkfun", "Board"))
+
+    def answer(url: str) -> dict:
+        if "git/trees" in url:
+            return PAIR if "/Board/" in url else tree("README.md")
+        return {"items": items}
+
+    monkeypatch.setattr(sources, "_get_json", answer)
+
+    found = sources.search("thing", orgs=["sparkfun"], limit=3, budget=12)
+
+    assert [r.full_name for r in found.repos] == ["sparkfun/Board"]
+    assert found.inspected == 10
+
+
+def test_a_search_stops_when_it_has_opened_enough(monkeypatch):
+    fake_github(monkeypatch, {
+        "org%3Aadafruit": {"items": [repo_item("adafruit", f"A{n}") for n in range(9)]},
+        "git/trees": tree("README.md"),
+    })
+
+    found = sources.search("x", orgs=["adafruit"], budget=3)
+
+    assert found.inspected == 3
+    assert "GITHUB_TOKEN" in found.stopped
+
+
+def test_a_refusal_partway_through_is_reported_not_raised(monkeypatch):
+    calls = {"n": 0}
+
+    def answer(url: str) -> dict:
+        if "git/trees" in url:
+            calls["n"] += 1
+            if calls["n"] > 1:
+                raise SourceError("GitHub's rate limit is used up")
+            return PAIR
+        return {"items": [repo_item("adafruit", "A1"), repo_item("adafruit", "A2")]}
+
+    monkeypatch.setattr(sources, "_get_json", answer)
+
+    found = sources.search("x", orgs=["adafruit"])
+
+    assert [r.full_name for r in found.repos] == ["adafruit/A1"]
+    assert "rate limit" in found.stopped
+
+
+def test_search_stops_at_the_limit(monkeypatch):
+    fake_github(monkeypatch, {
+        "org%3Aadafruit": {"items": [repo_item("adafruit", f"A{n}") for n in range(20)]},
+        "git/trees": PAIR,
+    })
+
+    assert len(sources.search("", orgs=["adafruit"], limit=4).repos) == 4
 
 
 def test_an_empty_query_ranks_by_popularity(monkeypatch):
@@ -114,13 +243,15 @@ def test_one_failing_vendor_does_not_sink_the_search(monkeypatch):
     def answer(url: str) -> dict:
         if "sparkfun" in url:
             raise SourceError("GitHub answered 502 Bad Gateway")
+        if "git/trees" in url:
+            return PAIR
         if "adafruit" in url:
             return {"items": [repo_item("adafruit", "A1")]}
-        return {"items": []}
+        raise SourceError("nothing there")
 
     monkeypatch.setattr(sources, "_get_json", answer)
 
-    assert [r.full_name for r in sources.search("x")] == ["adafruit/A1"]
+    assert [r.full_name for r in sources.search("board").repos] == ["adafruit/A1"]
 
 
 def test_every_vendor_failing_is_reported(monkeypatch):
@@ -165,6 +296,9 @@ def tree(*paths: str) -> dict:
     return {"tree": [blob(p) for p in paths]}
 
 
+PAIR = tree("board.sch", "board.brd")
+
+
 def test_the_two_halves_of_an_eagle_design_are_one_entry(monkeypatch):
     fake_github(monkeypatch, {"git/trees": tree(
         "Adafruit BME280.sch", "Adafruit BME280.brd", "README.md")})
@@ -187,6 +321,48 @@ def test_a_kicad_project_is_one_entry(monkeypatch):
     assert [d.tool for d in found] == ["kicad"]
     assert found[0].label == "hardware/XIAO"
     assert found[0].complete
+
+
+def test_a_board_ported_to_kicad_is_two_designs(monkeypatch):
+    """A vendor porting a board keeps both beside each other under one name.
+
+    Folded together they become one entry that pulls all four files down and
+    hides whichever half you wanted.
+    """
+    fake_github(monkeypatch, {"git/trees": tree(
+        "Hardware/Board.sch", "Hardware/Board.brd",
+        "Hardware/Board.kicad_pcb", "Hardware/Board.kicad_sch")})
+
+    found = sources.designs("sparkfun/X", "main")
+
+    assert [(d.tool, sorted(d.files)) for d in found] == [
+        ("eagle", [".brd", ".sch"]), ("kicad", [".kicad_pcb", ".kicad_sch"])]
+    assert all(d.complete for d in found)
+
+
+def test_a_search_can_ask_for_one_tool(monkeypatch):
+    fake_github(monkeypatch, {
+        "org%3Asparkfun": {"items": [repo_item("sparkfun", "S1")]},
+        "git/trees": tree("Board.sch", "Board.brd", "Board.kicad_pcb"),
+    })
+
+    found = sources.search("board", orgs=["sparkfun"], tool="kicad")
+
+    assert [d.tool for d in found.repos[0].designs] == ["kicad"]
+
+
+def test_asking_for_a_tool_nothing_uses_finds_nothing(monkeypatch):
+    fake_github(monkeypatch, {
+        "org%3Asparkfun": {"items": [repo_item("sparkfun", "S1")]},
+        "git/trees": tree("Board.sch", "Board.brd"),
+    })
+
+    assert sources.search("board", orgs=["sparkfun"], tool="kicad").repos == []
+
+
+def test_an_unknown_tool_is_refused():
+    with pytest.raises(SourceError, match="unknown tool"):
+        sources.search("x", tool="altium")
 
 
 def test_a_kicad_drawing_without_a_board_is_not_offered(monkeypatch):
@@ -418,12 +594,16 @@ def test_answers_are_cached_for_the_life_of_the_process(monkeypatch):
 # --------------------------------------------------------------------------
 
 def test_the_search_endpoint_shapes_results_for_the_page(monkeypatch):
-    fake_github(monkeypatch, {"org%3Aadafruit": {"items": [repo_item("adafruit", "A1")]}})
+    fake_github(monkeypatch, {
+        "org%3Aadafruit": {"items": [repo_item("adafruit", "A1")]},
+        "git/trees": PAIR,
+    })
 
-    out = web.search({"query": "bme280", "vendors": ["adafruit"]})
+    out = web.search({"query": "board", "vendors": ["adafruit"]})
 
     assert out["repos"][0]["repo"] == "adafruit/A1"
     assert out["repos"][0]["vendor"] == "Adafruit"
+    assert [d["name"] for d in out["repos"][0]["designs"]] == ["board"]
     assert out["hasToken"] is False
 
 
@@ -514,32 +694,45 @@ def test_health_advertises_what_can_be_searched():
 # the command line
 # --------------------------------------------------------------------------
 
-def test_search_prints_each_repository(monkeypatch, capsys):
-    fake_github(monkeypatch, {"org%3Aadafruit": {"items": [repo_item("adafruit", "A1")]}})
-
-    assert cli.main(["search", "bme280", "--vendor", "adafruit"]) == 0
-
-    out = capsys.readouterr().out
-    assert "adafruit/A1" in out
-    assert "Adafruit" in out
-    assert "GITHUB_TOKEN" in out                    # the rate-limit hint
-
-
-def test_search_can_look_inside_each_result(monkeypatch, capsys):
+def test_search_prints_each_repository_with_its_designs(monkeypatch, capsys):
     fake_github(monkeypatch, {
         "org%3Aadafruit": {"items": [repo_item("adafruit", "A1")]},
         "git/trees": tree("BME280.sch", "BME280.brd"),
     })
 
-    cli.main(["search", "bme280", "--vendor", "adafruit", "--designs"])
+    assert cli.main(["search", "bme280", "--vendor", "adafruit"]) == 0
 
-    assert "BME280" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "adafruit/A1" in out
+    assert "BME280" in out                          # the design, not just the repo
+    assert "GITHUB_TOKEN" in out                    # the rate-limit hint
+
+
+def test_search_can_list_repositories_without_opening_them(monkeypatch, capsys):
+    seen = fake_github(monkeypatch, {
+        "org%3Aadafruit": {"items": [repo_item("adafruit", "A1")]}})
+
+    assert cli.main(["search", "x", "--vendor", "adafruit", "--any"]) == 0
+
+    assert "adafruit/A1" in capsys.readouterr().out
+    assert len(seen) == 1
 
 
 def test_a_search_with_no_hits_reports_it(monkeypatch, capsys):
     fake_github(monkeypatch, {"org%3Aadafruit": {"items": []}})
 
     assert cli.main(["search", "nothing", "--vendor", "adafruit"]) == 1
+
+
+def test_a_name_the_console_cannot_print_does_not_stop_the_listing(monkeypatch, capsys):
+    """Vendors name designs in their own scripts; consoles are often cp1252."""
+    fake_github(monkeypatch, {
+        "org%3Aadafruit": {"items": [repo_item("adafruit", "A1")]},
+        "git/trees": tree("\u5e73\u677f/board.sch", "\u5e73\u677f/board.brd"),
+    })
+
+    assert cli.main(["search", "board", "--vendor", "adafruit"]) == 0
+    assert "board" in capsys.readouterr().out
 
 
 def test_an_unknown_vendor_is_refused(capsys):

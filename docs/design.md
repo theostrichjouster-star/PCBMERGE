@@ -47,11 +47,22 @@ to. `hardware_rank` scores a repository on words like *pcb*, *breakout* and
 *shield* against *library*, *driver* and *firmware*, and reorders each account's
 results. It only reorders: nothing a search returned is hidden.
 
-**Contents are listed lazily.** A search costs one request per vendor and listing
-a repository costs one more, against a limit of sixty an hour unauthenticated.
-Results are named first and looked inside only when opened, the front end filling
-in the first few and stopping at the first refusal. Every answer is cached for ten
-minutes.
+**A result is a design, not a repository.** GitHub's repository search matches a
+name and a description and never the files inside, which fails in both directions:
+it returns libraries and example code that hold no hardware, and it misses hardware
+whose repository is named after something else. Every candidate is therefore opened
+and kept only if a design is in it.
+
+**Catalogue repositories are always opened.** Some vendors keep many designs in one
+repository whose name answers no part query at all; seven XIAO designs sit in
+`OPL_Kicad_Library`. Those are named per vendor in `Source.catalogs`, always looked
+in, and filtered by the names of the designs rather than the repository, or a
+catalogue would answer every search.
+
+**Opening costs a request**, against sixty an hour unauthenticated, so a search
+opens at most `BUDGET` repositories and reports on `Found.stopped` when it stopped
+short. A refusal partway through returns what was found rather than raising, since
+half a page of results beats none. Every answer is cached for ten minutes.
 
 Downloading pairs files the same way the rest of the tool does, by extension after
 a shared stem, and writes both halves of a design under one name. Renaming one

@@ -209,10 +209,13 @@ def search(body: dict) -> dict:
     vendors = [v for v in (body.get("vendors") or []) if isinstance(v, str)]
     limit = max(1, min(int(body.get("limit") or 12), 30))
 
-    repos = sources.search(query, orgs=vendors or None, limit=limit)
+    tool = (body.get("tool") or "").strip()
+    found = sources.search(query, orgs=vendors or None, limit=limit, tool=tool)
     return {
         "query": query,
-        "repos": [_repo_json(repo) for repo in repos],
+        "repos": [_repo_json(repo) for repo in found.repos],
+        "inspected": found.inspected,
+        "stopped": found.stopped,
         "hasToken": bool(sources.token()),
     }
 
@@ -223,6 +226,7 @@ def _repo_json(repo) -> dict:
         "vendor": repo.vendor, "description": repo.description,
         "stars": repo.stars, "updated": repo.updated,
         "branch": repo.branch, "url": repo.url,
+        "designs": [_design_json(design) for design in repo.designs],
     }
 
 
@@ -247,6 +251,7 @@ def _design_json(design) -> dict:
         "tool": design.tool, "branch": design.branch, "files": design.files,
         "label": design.label, "summary": design.summary,
         "complete": design.complete, "size": design.size,
+        "partial": design.partial,
     }
 
 

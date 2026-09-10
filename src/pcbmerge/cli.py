@@ -472,29 +472,47 @@ def cmd_search(args: argparse.Namespace) -> int:
     b, d, o = _color(not args.no_color)
     orgs = _orgs(args.vendor)
 
-    repos = sources.search(" ".join(args.terms), orgs=orgs, limit=args.limit)
-    if not repos:
-        print(f"nothing matching {' '.join(args.terms)!r} in "
-              f"{', '.join(orgs)}" if args.terms else "no repositories found")
+    found = sources.search(" ".join(args.terms), orgs=orgs, limit=args.limit,
+                           inspect=not args.any, tool=args.tool or "")
+    if not found.repos:
+        terms = " ".join(args.terms)
+        print(f"nothing with designs matching {terms!r} in {', '.join(orgs)}"
+              if terms else f"no designs found in {', '.join(orgs)}")
+        if found.stopped:
+            print(f"  {d}{found.stopped}{o}")
         return 1
 
-    print(f"{b}{len(repos)} repositor{'y' if len(repos) == 1 else 'ies'}{o}")
-    for repo in repos:
-        print(f"\n  {b}{repo.full_name}{o}  {d}{repo.vendor}, "
+    total = sum(len(repo.designs) for repo in found.repos)
+    head = f"{len(found.repos)} repositor" + ("y" if len(found.repos) == 1 else "ies")
+    print(f"{b}{total} design(s) in {head}{o}" if total else f"{b}{head}{o}")
+
+    for repo in found.repos:
+        print()
+        print(f"  {b}{_safe(repo.full_name)}{o}  {d}{repo.vendor}, "
               f"{repo.stars} star(s), updated {repo.updated or 'unknown'}{o}")
         if repo.description:
-            print(f"    {repo.description[:96]}")
-        if args.designs:
-            _print_designs(sources.designs(repo.full_name, repo.branch), d, o)
+            print(f"    {_safe(repo.description[:96])}")
+        _print_designs(repo.designs, d, o)
 
-    if not args.designs:
-        print(f"\n{d}pcbmerge fetch <owner/name>   to see the designs inside one{o}")
-    else:
-        print(f"\n{d}pcbmerge fetch <owner/name> --all --dest downloads{o}")
+    if found.stopped:
+        print()
+        print(f"{d}{found.stopped}{o}")
+    print()
+    print(f"{d}pcbmerge fetch <owner/name> --all --dest <project folder>{o}")
     if not sources.token():
         print(f"{d}GitHub allows a few requests an hour unauthenticated; set "
               f"GITHUB_TOKEN to raise that.{o}")
     return 0
+
+
+def _safe(text: str) -> str:
+    """Printable on this console, whatever the vendor called the design.
+
+    A Windows console is usually cp1252 and a design name often is not, and
+    falling over while listing search results helps nobody.
+    """
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    return text.encode(encoding, errors="replace").decode(encoding, errors="replace")
 
 
 def _print_designs(found: list, d: str, o: str, indent: str = "    ") -> None:
@@ -503,8 +521,10 @@ def _print_designs(found: list, d: str, o: str, indent: str = "    ") -> None:
         return
     for design in found:
         mark = " " if design.complete else "!"
-        print(f"{indent}{mark} {design.label:<52} {d}{design.tool}, "
+        print(f"{indent}{mark} {_safe(design.label):<52} {d}{design.tool}, "
               f"{design.summary}{o}")
+        if design.partial:
+            print(f"{indent}  {d}this repository was too big to list in full{o}")
 
 
 def cmd_fetch(args: argparse.Namespace) -> int:
@@ -513,7 +533,7 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     repo = sources.repository(args.repo)
     found = sources.designs(repo.full_name, repo.branch)
 
-    print(f"{b}{repo.full_name}{o}  {d}{repo.vendor}, branch {repo.branch}{o}")
+    print(f"{b}{_safe(repo.full_name)}{o}  {d}{repo.vendor}, branch {repo.branch}{o}")
     if not found:
         print(f"  {d}no EAGLE or KiCad designs in this repository{o}")
         return 1
@@ -809,9 +829,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help=f"limit to one account ({vendors}); repeatable")
     finder.add_argument("--limit", type=int, default=12,
                         help="how many repositories to show (default: 12)")
-    finder.add_argument("--designs", action="store_true",
-                        help="also list the designs inside each result "
-                             "(one request per repository)")
+    finder.add_argument("--tool", choices=("eagle", "kicad"),
+                        help="show only designs drawn with this tool")
+    finder.add_argument("--any", action="store_true",
+                        help="list repositories without opening them: one request "
+                             "per vendor instead of one per result, and shows "
+                             "repositories that hold no designs")
     finder.set_defaults(func=cmd_search)
 
     getter = subparsers.add_parser(

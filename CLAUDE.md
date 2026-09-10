@@ -209,9 +209,24 @@ to accommodate it.
 - **Hardware is ranked above software.** Searching a part number finds the driver
   library long before the board. `hardware_rank` reorders each account's results; it
   never hides anything.
-- **Contents are listed lazily.** Sixty unauthenticated requests an hour, ten searches
-  a minute. Answers are cached for ten minutes and the page looks inside only the
-  first few results, stopping at the first refusal. `GITHUB_TOKEN` raises the limit.
+- **A result is a design, not a repository.** Repository search matches names and
+  descriptions, never file contents, so it both returns repositories with no hardware
+  and misses hardware in a repository named after something else. Every candidate is
+  opened and kept only if it holds a design.
+- **Catalogue repositories are always opened**, named per vendor in `Source.catalogs`,
+  and filtered by design name rather than repository name -- otherwise a catalogue
+  answers every search. This is what makes Seeed's KiCad designs findable at all.
+- **Opening costs a request.** Sixty an hour unauthenticated, so a search opens at most
+  `BUDGET` repositories and puts the reason on `Found.stopped`. A refusal partway
+  through returns what was found rather than raising. `GITHUB_TOKEN` raises the limit.
+- **Candidates follow the budget, not the result limit.** Offering inspection only as
+  many repositories as will be shown starves it: the first names a vendor returns are
+  usually libraries, and a search able to open nothing else reports that the vendor has
+  no hardware.
+- **A design is keyed by tool as well as by name.** A vendor porting a board keeps the
+  EAGLE pair and the KiCad project beside each other under one name; folded together
+  they become one entry that pulls all four files down and hides whichever half was
+  wanted.
 - **A downloaded design keeps one stem for both halves**, or the merge cannot find the
   board. Nothing from the repository is used as a path: the name is sanitised, only a
   known design extension survives, and a repeat download gets its own stem.

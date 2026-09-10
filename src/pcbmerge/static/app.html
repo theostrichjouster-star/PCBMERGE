@@ -588,7 +588,8 @@ const SNAP = { board: 1, sheet: 2.54 };
 const online = {
   vendors: [],            // what the server says it can search
   picked: new Set(),      // organisations currently ticked
-  repos: [],              // search results, each gaining .designs when opened
+  repos: [],              // search results, each carrying its own designs
+  stopped: "",            // why a search stopped short, when it did
   chosen: new Map(),      // key -> design, across every result
   token: false,
 };
@@ -772,48 +773,21 @@ async function runSearch() {
       query,
       vendors: [...online.picked],
     });
-    online.repos = data.repos.map((repo) => ({ ...repo, designs: null, open: false, note: "" }));
+    // Every result already carries its designs: a repository with none is not
+    // a result at all, so there is nothing left to go back for.
+    online.repos = data.repos.map((repo, index) => ({
+      ...repo, open: index === 0, note: "",
+    }));
+    online.stopped = data.stopped || "";
     online.chosen.clear();
     showError("");
     renderResults();
-    prefetch();
   } catch (err) {
     $("results").innerHTML = "";
     $("results").append(el("div", "empty", "Nothing found."));
     showError(err.message);
   } finally {
     $("search").disabled = false;
-  }
-}
-
-async function loadRepo(repo) {
-  // One request to GitHub per repository, so this is never done in bulk.
-  if (repo.designs || repo.loading) return;
-  repo.loading = true;
-  renderResults();
-  try {
-    const data = await post("/api/repo", { repo: repo.repo, branch: repo.branch });
-    repo.designs = data.designs;
-    repo.note = data.designs.length ? "" : "no designs in this repository";
-  } catch (err) {
-    repo.designs = [];
-    repo.note = err.message;
-    throw err;
-  } finally {
-    repo.loading = false;
-    renderResults();
-  }
-}
-
-async function prefetch() {
-  // Fill in the first few counts so the list is useful without clicking, and
-  // stop at the first refusal rather than spending the whole rate limit.
-  for (const repo of online.repos.slice(0, 4)) {
-    try {
-      await loadRepo(repo);
-    } catch (err) {
-      return;
-    }
   }
 }
 
@@ -838,7 +812,6 @@ function renderResults() {
     head.onclick = () => {
       repo.open = !repo.open;
       renderResults();
-      if (repo.open) loadRepo(repo).catch((err) => showError(err.message));
     };
     box.append(head);
 
@@ -847,6 +820,7 @@ function renderResults() {
     host.append(box);
   });
 
+  if (online.stopped) host.append(el("div", "warn", online.stopped));
   updateImportBar();
 }
 
@@ -868,27 +842,23 @@ function updateImportBar() {
 }
 
 function countLabel(repo) {
-  if (repo.loading) return "reading…";
-  if (repo.designs === null) return `★ ${repo.stars}`;
-  if (!repo.designs.length) return "no designs";
-  const pairs = repo.designs.filter((d) => d.complete).length;
-  return pairs === repo.designs.length
+  const designs = repo.designs || [];
+  if (!designs.length) return "no designs";
+  const pairs = designs.filter((d) => d.complete).length;
+  return pairs === designs.length
     ? `${pairs} design${pairs === 1 ? "" : "s"}`
-    : `${pairs} of ${repo.designs.length} complete`;
+    : `${pairs} of ${designs.length} complete`;
 }
 
 function designList(repo) {
   const host = el("div", "designs");
-  if (repo.designs === null) {
-    host.append(el("div", "sub", repo.loading ? "Reading the file list…" : ""));
-    return host;
-  }
-  if (!repo.designs.length) {
+  const designs = repo.designs || [];
+  if (!designs.length) {
     host.append(el("div", "sub", repo.note || "no EAGLE or KiCad designs here"));
     return host;
   }
 
-  repo.designs.forEach((design) => {
+  designs.forEach((design) => {
     const key = designKey(design);
     const row = el("div", "row");
     const box = el("input");

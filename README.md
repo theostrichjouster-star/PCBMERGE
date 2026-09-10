@@ -130,16 +130,38 @@ pcbmerge merge downloads -o combo --out-dir out --yes
     A basic Qwiic board to provide atmospheric data from the BME280.
 ```
 
-Results come back a row at a time from each account, so one vendor cannot crowd
-out the others, and hardware is pulled above software before they are shown.
+**Every result holds at least one design.** A repository search matches a name and
+a description, never the files inside, so on its own it returns page after page of
+driver libraries and example code. Each candidate is opened and kept only if there
+is hardware in it.
+
+That also finds hardware whose repository is named after something else. Seven XIAO
+designs live in `Seeed-Studio/OPL_Kicad_Library`, whose name and description say
+nothing about XIAO, so no search for the part would ever have reached them. Each
+vendor's catalogue repositories are listed and always looked in, matched by the
+names of the designs they hold rather than the name of the repository.
+
+Results come back a row at a time from each account, so one vendor cannot crowd out
+the others, and hardware is pulled above software before anything is opened.
 Searching a part number otherwise returns the driver library long before the board
 it drives, because that is what people star and link to.
 
-`--vendor` narrows the search to one account, and `--designs` looks inside each
-result rather than only naming it:
+`--vendor` narrows the search to one account, and `--tool` to one of the two
+formats. A vendor that has ported a board keeps the EAGLE pair and the KiCad
+project side by side under the same name, and they are listed separately so you
+can take the one you want rather than all four files:
 
 ```bash
-pcbmerge search qwiic --vendor sparkfun --designs
+pcbmerge search qwiic --vendor sparkfun
+pcbmerge search xiao --tool kicad
+```
+
+Opening a repository costs a request, so a search opens at most eighteen and says
+so if it ran out. `--any` skips opening entirely, which costs one request per vendor
+and lists repositories whether or not they hold anything:
+
+```bash
+pcbmerge search xiao --any
 ```
 
 `fetch` on its own lists what a repository holds and writes nothing:
@@ -166,9 +188,10 @@ offers the folder dialog; choose one and the import carries on.
 ### Rate limits
 
 GitHub allows about sixty unauthenticated requests an hour, and searches are counted
-separately at ten a minute. A search costs one request per vendor, and looking inside
-a repository costs one more. Answers are cached for ten minutes, and the front end
-only looks inside the first few results, leaving the rest until they are opened.
+separately at ten a minute. A search costs one request per vendor plus one for every
+repository it opens, which is what makes the results worth reading and also what
+makes them expensive. Answers are cached for ten minutes, and a search stops after
+eighteen repositories rather than spending the whole hour on one query.
 
 Setting `GITHUB_TOKEN` (or `GH_TOKEN`) to a personal access token raises the limit
 considerably. No scopes are needed for public repositories.
@@ -587,12 +610,14 @@ pcbmerge web [folder] [--port 8765] [--no-browser]
 ### search
 
 ```bash
-pcbmerge search [terms ...] [--vendor ORG] [--limit N] [--designs]
+pcbmerge search [terms ...] [--vendor ORG] [--tool eagle|kicad] [--limit N] [--any]
 ```
 
-Finds repositories in the vendor accounts. With no terms it lists the most popular
-in each. `--vendor` is repeatable and takes either form of a name, `sparkfun` or
-`SparkFun`.
+Finds designs in the vendor accounts, listing each repository with what is inside
+it. Only repositories holding at least one design are shown. With no terms it lists
+the most popular in each account. `--vendor` is repeatable and takes either form of
+a name, `sparkfun` or `SparkFun`. `--tool` keeps only designs drawn with EAGLE or
+with KiCad. `--any` lists repositories without opening them.
 
 ### fetch
 
@@ -700,6 +725,8 @@ pcbmerge check out/combo
 
 - Writes EAGLE only. Reads EAGLE and KiCad; Altium is not supported.
 - Search covers the three vendor accounts only, and reads public repositories.
+- A repository too big for GitHub to list in one request is reported as
+  partial; some designs in it may not be shown.
 - Designs are placed by hand as whole blocks. Moving one part within a
   design is a job for EAGLE, on the merged file.
 - KiCad buses and bus entries are not converted; a wired connection is.

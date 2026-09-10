@@ -51,17 +51,27 @@ class SourceError(EagleError):
 
 @dataclass(frozen=True)
 class Source:
-    """A vendor whose hardware repositories can be searched."""
+    """A vendor whose hardware repositories can be searched.
+
+    `catalogs` names repositories that hold many designs at once.  GitHub's
+    repository search matches a name and a description, never the files
+    inside, so a catalogue is invisible to any search for a part: nothing in
+    "OPL_Kicad_Library" says XIAO, though seven XIAO designs are in it.  Those
+    repositories are therefore always looked in, and matched by the names of
+    the designs they hold.
+    """
 
     org: str
     label: str
     note: str
+    catalogs: tuple[str, ...] = ()
 
 
 VENDORS: tuple[Source, ...] = (
     Source("adafruit", "Adafruit", "Breakouts and Feather boards, mostly EAGLE"),
     Source("sparkfun", "SparkFun", "Qwiic and RedBoard hardware, mostly EAGLE"),
-    Source("Seeed-Studio", "Seeed Studio", "Grove, XIAO and Wio hardware, mostly KiCad"),
+    Source("Seeed-Studio", "Seeed Studio", "Grove, XIAO and Wio hardware, mostly KiCad",
+           catalogs=("OPL_Kicad_Library",)),
 )
 
 ORGS = tuple(s.org for s in VENDORS)
@@ -80,7 +90,7 @@ def source_for(org: str) -> Source | None:
 
 @dataclass
 class Repo:
-    """One repository in a vendor's account."""
+    """One repository in a vendor's account, and what was found inside it."""
 
     owner: str
     name: str
@@ -89,6 +99,8 @@ class Repo:
     updated: str = ""
     branch: str = "main"
     url: str = ""
+    designs: list = field(default_factory=list)
+    catalog: bool = False
 
     @property
     def full_name(self) -> str:
@@ -111,6 +123,7 @@ class RemoteDesign:
     branch: str = "main"
     files: dict[str, str] = field(default_factory=dict)   # suffix -> path
     size: int = 0
+    partial: bool = False     # the repository was too big to list in full
 
     @property
     def complete(self) -> bool:
@@ -210,44 +223,126 @@ def clear_cache() -> None:
 # search
 # --------------------------------------------------------------------------
 
-def search(query: str, orgs: list[str] | None = None, limit: int = 12) -> list[Repo]:
-    """Repositories matching `query` across the vendor accounts.
+@dataclass
+class Found:
+    """What a search turned up, and how much of the account it got through."""
 
-    One search per account rather than one search with several `org:`
-    qualifiers, so no single vendor can crowd the others out: the results are
-    taken a row at a time from each.
+    repos: list[Repo] = field(default_factory=list)
+    inspected: int = 0
+    stopped: str = ""       # why it gave up early, if it did
+
+
+# Looking inside a repository costs one request, so a search cannot look
+# inside every candidate.  This is how many it will open before giving up.
+BUDGET = 18
+
+
+def search(query: str, orgs: list[str] | None = None, limit: int = 12,
+           inspect: bool = True, budget: int = BUDGET, tool: str = "") -> Found:
+    """Designs matching `query` across the vendor accounts.
+
+    A repository search only matches names and descriptions, so on its own it
+    returns a great many repositories with no hardware in them at all and
+    misses hardware whose repository is named after something else.  Each
+    candidate is therefore opened and kept only if it actually holds a design.
+
+    That costs a request per repository, so the number opened is capped and
+    the results are taken a row at a time from each vendor, which spends the
+    budget evenly rather than on whichever account sorted first.
+
+    `tool` narrows the answer to "eagle" or "kicad"; a repository left holding
+    nothing of that tool drops out of the results with everything else that
+    holds no design.
     """
+    if tool and tool not in ("eagle", "kicad"):
+        raise SourceError(f"unknown tool {tool!r}; choose eagle or kicad")
     wanted = [o for o in (orgs or ORGS) if o]
     if not wanted:
         raise SourceError("no vendor selected to search")
 
     query = (query or "").strip()
-    per_org = max(3, min(limit, 20))
-    found: list[list[Repo]] = []
+    candidates, problems = _candidates(query, wanted, max(limit, budget))
+    if not candidates and problems:
+        raise SourceError(problems[0].split(": ", 1)[-1])
+    if not inspect:
+        return Found(repos=candidates[:limit])
+
+    out = Found()
+    for repo in candidates:
+        if len(out.repos) >= limit or out.inspected >= budget:
+            if len(out.repos) < limit and out.inspected >= budget:
+                out.stopped = (f"stopped after opening {out.inspected} repositories; "
+                               f"narrow the search or set GITHUB_TOKEN")
+            break
+        try:
+            repo.designs = designs(repo.full_name, repo.branch)
+        except SourceError as exc:
+            out.stopped = str(exc)
+            break
+        out.inspected += 1
+        if repo.catalog:
+            # A catalogue answers every search unless its designs are filtered.
+            repo.designs = [d for d in repo.designs if matches(d, query)]
+        if tool:
+            repo.designs = [d for d in repo.designs if d.tool == tool]
+        if repo.designs:
+            out.repos.append(repo)
+    return out
+
+
+def matches(design: "RemoteDesign", query: str) -> bool:
+    """Whether a design's own name answers the query."""
+    if not query:
+        return True
+    haystack = f"{design.folder} {design.name}".lower()
+    words = [w for w in re.split(r"[^a-z0-9]+", query.lower()) if w]
+    return all(word in haystack for word in words) if words else True
+
+
+def _candidates(query: str, wanted: list[str], depth: int) -> tuple[list[Repo], list[str]]:
+    """Repositories worth opening, taken a row at a time from each vendor.
+
+    `depth` is how many to offer per account, and it follows the inspection
+    budget rather than the number of results wanted.  Offering only as many as
+    will be shown starves the search: the first few names a vendor returns are
+    usually libraries, and if those are all it can open it reports that the
+    vendor has no hardware at all.
+    """
+    per_org = max(3, min(depth, 40))
+    rows: list[list[Repo]] = []
     problems: list[str] = []
 
     for org in wanted:
+        group: list[Repo] = []
+        source = source_for(org)
+        for name in (source.catalogs if source else ()):
+            try:
+                catalogue = repository(f"{org}/{name}")
+            except SourceError:
+                continue
+            catalogue.catalog = True
+            group.append(catalogue)
         try:
-            found.append(_search_org(query, org, per_org))
+            group.extend(_search_org(query, org, per_org))
         except SourceError as exc:
             problems.append(f"{org}: {exc}")
-
-    if not found and problems:
-        raise SourceError(problems[0].split(": ", 1)[-1])
+        rows.append(group)
 
     out: list[Repo] = []
-    for row in range(per_org):
-        for group in found:
-            if row < len(group):
+    seen: set[str] = set()
+    for row in range(max((len(g) for g in rows), default=0)):
+        for group in rows:
+            if row < len(group) and group[row].full_name not in seen:
+                seen.add(group[row].full_name)
                 out.append(group[row])
-    return out[:limit]
+    return out, problems
 
 
 def _search_org(query: str, org: str, per_page: int) -> list[Repo]:
     terms = f"{query} org:{org}".strip() if query else f"org:{org}"
     # Ask for more than will be shown, because the hardware is often ranked
     # below the software written for it and has to be pulled back up.
-    params = {"q": terms, "per_page": str(min(60, per_page * 4))}
+    params = {"q": terms, "per_page": str(min(100, max(20, per_page * 3)))}
     if not query:
         # With nothing to rank by, the best guess at "interesting" is popular.
         params["sort"] = "stars"
@@ -329,8 +424,15 @@ def designs(full_name: str, branch: str = "") -> list[RemoteDesign]:
 
     reference = urllib.parse.quote(branch, safe="")
     payload = _get_json(f"{API}/repos/{owner}/{name}/git/trees/{reference}?recursive=1")
+    # GitHub caps a recursive listing; a repository big enough to hit that cap
+    # may hold designs this never sees, which is worth knowing about.
+    truncated = bool(payload.get("truncated"))
 
-    grouped: dict[tuple[str, str], RemoteDesign] = {}
+    # Grouped by tool as well as by name, because a vendor that ports a board
+    # to KiCad often keeps both beside each other under the same name.  Folded
+    # together they become one entry that drags all four files down at once and
+    # hides whichever half you wanted.
+    grouped: dict[tuple[str, str, str], RemoteDesign] = {}
     for entry in payload.get("tree", []):
         if entry.get("type") != "blob":
             continue
@@ -341,19 +443,18 @@ def designs(full_name: str, branch: str = "") -> list[RemoteDesign]:
 
         folder, _, filename = path.rpartition("/")
         stem = filename[: -len(suffix)]
-        key = (folder, stem.lower())
+        tool = TOOLS[suffix]
+        key = (folder, stem.lower(), tool)
         design = grouped.get(key)
         if design is None:
             design = RemoteDesign(repo=f"{owner}/{name}", name=stem, folder=folder,
-                                  tool="eagle", branch=branch)
+                                  tool=tool, branch=branch)
             grouped[key] = design
         design.files[suffix] = path
         design.size += int(entry.get("size") or 0)
 
     out = []
     for design in grouped.values():
-        if ".kicad_pcb" in design.files or ".kicad_sch" in design.files:
-            design.tool = "kicad"
         # A KiCad drawing on its own carries no netlist, and the converter
         # reads the board; an EAGLE schematic alone still merges.
         if design.tool == "kicad" and ".kicad_pcb" not in design.files:
@@ -363,7 +464,13 @@ def designs(full_name: str, branch: str = "") -> list[RemoteDesign]:
         out.append(design)
 
     out.sort(key=lambda d: (not d.complete, d.folder.lower(), d.name.lower()))
+    if truncated and out:
+        out[-1].partial = True
     return out
+
+
+TOOLS = {".kicad_sch": "kicad", ".kicad_pcb": "kicad",
+         ".sch": "eagle", ".brd": "eagle"}
 
 
 def _design_suffix(path: str) -> str | None:
