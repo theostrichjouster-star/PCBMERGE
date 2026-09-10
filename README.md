@@ -791,3 +791,12 @@ pcbmerge check out/combo
 - Placement search permutes which board goes where. It does not rotate boards or
   attempt non-rectangular nesting.
 - Copper is never re-routed. Joined nets are left as airwires on purpose.
+
+## Licence
+
+MIT, in `LICENSE`.
+
+The designs in `examples/basic` are not covered by it. They are hardware
+published by Adafruit and SparkFun, included so the tool can be tried against
+real files rather than something written to suit it, and they carry their own
+terms. `LICENSE` says where each came from.
