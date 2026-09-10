@@ -65,18 +65,33 @@ Everything the page does is also on the command line. Run `pcbmerge --help`.
 
 Python 3.10 or newer. No dependencies.
 
+Download the repository, unzip it, and run the installer inside. On Windows,
+double-click `install.bat`. Anywhere else:
+
 ```bash
-pip install -e .
+python install.py
 ```
 
-That puts `pcbmerge` on your PATH:
+It checks the Python version, hands the work to pip, and tells you where the
+command went and what to type next. If pip refuses, it says which of the usual
+three reasons it was rather than leaving you with pip's own wording.
+
+There is nothing it does that this does not:
+
+```bash
+pip install .
+```
+
+Either way you get a `pcbmerge` command:
 
 ```bash
 pcbmerge --version
 ```
 
-Reinstalling fails while `pcbmerge web` is running, because the server holds the
-executable. Stop it first.
+Add `--dev` to install in place, so edits to the source take effect without
+reinstalling, and `--uninstall` to remove it. Reinstalling fails while
+`pcbmerge web` is running, because the server holds the executable; stop it
+first.
 
 ## What it will not do
 
