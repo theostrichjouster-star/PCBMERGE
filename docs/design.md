@@ -11,7 +11,8 @@ you route.
 | --- | --- |
 | `sources.py` | Search the vendor accounts on GitHub and download designs. |
 | `sexp.py` | Read the S-expressions KiCad writes. |
-| `kicad.py` | Convert a KiCad design into an EAGLE pair on the way in. |
+| `kicad.py` | Convert a KiCad board into an EAGLE pair on the way in. |
+| `kicad_sch.py` | Convert the KiCad schematic drawing that goes with it. |
 | `eagle.py` | Load, save and transform EAGLE XML. Coordinate translation, content hashing, name sanitising. |
 | `libraries.py` | Merge library sets, renaming items that clash by name but differ in content. |
 | `nets.py` | Classify net names and decide join or split. |
@@ -79,6 +80,36 @@ Three things have to be translated rather than copied:
 - **Net names.** `/Sheet/VCC_3V3` keeps only its leaf or no rail would match an
   EAGLE design's; `Net-(U1-Pad2)` becomes `N$1` so the resolver keeps it apart the
   same way it keeps EAGLE's anonymous nets apart.
+
+### The drawing
+
+`kicad_sch.py` reads the `.kicad_sch` and produces symbols, placements, wires and
+nets; `kicad.py` wraps them in a document and falls back to the netlist boxes when
+there is nothing to draw. The split keeps the board conversion, which is the part
+everything else depends on, free of the drawing's complications.
+
+Three things decide whether the result looks right.
+
+**Two coordinate systems.** A symbol is stored y-up and a sheet y-down, so symbol
+geometry crosses over untouched and everything sheet-level has its y negated. Doing
+one flip too many draws each symbol upside down inside a correctly placed outline,
+which is subtle enough to ship by accident.
+
+**Rotation is the symbol's.** A placement angle is applied in the symbol's y-up
+frame and carried across unchanged. That was settled against a real file rather than
+reasoned about: on a Seeed board of 157 symbols, taking the angle as given lands
+pins on wire ends everywhere that negating it does, and in the rotated cases where
+negating it does not.
+
+**Unit 0 is not a unit.** KiCad puts what every unit shares in unit 0, and most
+two-pin parts are drawn entirely there while still being placed as unit 1. Treating
+unit 0 as a unit of its own leaves those parts with no symbol, no part, and pinrefs
+pointing at a part that was never made, which EAGLE refuses to open.
+
+Connectivity is union-find over the points the drawing actually contains. Wires join
+at shared ends; anything sitting on the middle of a wire joins it, which is how a T
+and a pin landing mid-span connect; two wires merely crossing do not, which is why
+intersections are never computed. Each group then takes its name from the board.
 
 ### Filenames with dots
 
@@ -388,6 +419,10 @@ of overlapping text.
 `tests/conftest.py` builds small synthetic EAGLE designs that clash deliberately:
 same part names, same library names with different pad geometry, and a net set
 covering every bucket. Those tests run in milliseconds and pin the behaviour.
+
+`tests/test_kicad_sch.py` pairs an inline drawing with the inline board from
+`tests/test_kicad.py`, so the two halves can be checked against each other: the
+same part names, the same net names, and no pinref to a part that was never made.
 
 `tests/test_placement.py` covers hand placement at every level it passes
 through: the geometry in `layout.pin`, the plan round trip, the merger honouring

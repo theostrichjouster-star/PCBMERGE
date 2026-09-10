@@ -24,7 +24,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import sexp
+from . import kicad_sch, sexp
 from .eagle import (
     EagleDoc, EagleError, design_stem, fmt, sanitize_name, unique_name, with_ext,
 )
@@ -177,21 +177,142 @@ def convert(stem: Path) -> Converted:
     packages, parts = _footprints(tree, name, nets, notes)
 
     board = _build_board(tree, name, packages, parts, nets, notes)
-    schematic = _build_schematic(name, packages, parts, notes)
-    _note_schematic_source(stem, notes)
+    schematic = _drawn_schematic(stem, name, packages, parts, notes)
+    if schematic is None:
+        schematic = _build_schematic(name, packages, parts, notes)
     return Converted(name=name, schematic=schematic, board=board, notes=notes)
 
 
-def _note_schematic_source(stem: Path, notes: list[str]) -> None:
-    drawing = with_ext(stem, SCH_SUFFIX)
-    if drawing.exists():
+def _drawn_schematic(stem: Path, design: str, packages: dict[str, ET.Element],
+                     parts: list[_Part], notes: list[str]) -> EagleDoc | None:
+    """The schematic as it was drawn, when the drawing is there to read.
+
+    Returns None when there is nothing worth drawing, which leaves the caller
+    to fall back to the netlist.  The commonest reason is a root sheet whose
+    real content lives in child files that were not published with it.
+    """
+    source = with_ext(stem, SCH_SUFFIX)
+    if not source.exists():
+        notes.append(f"{stem.name}: no {SCH_SUFFIX} beside the board, so the "
+                     f"schematic is drawn from the board netlist")
+        return None
+
+    try:
+        drawing = kicad_sch.read(source)
+    except (OSError, ValueError) as exc:
+        notes.append(f"{source.name}: could not be read ({exc}); the schematic is "
+                     f"drawn from the board netlist instead")
+        return None
+
+    if not drawing.usable:
+        _note_nothing_drawn(source, drawing, notes)
+        return None
+
+    pads = {name: _pads_of(node) for name, node in packages.items()}
+    package_of = {part.ref: part.package for part in parts}
+    board_nets = {(part.ref, pad): net for part in parts for pad, net in part.pads}
+    built = kicad_sch.build(drawing, pads, package_of, board_nets)
+
+    doc = _assemble_schematic(design, packages, built)
+    _note_drawn(source, drawing, built, notes)
+    return doc
+
+
+def _note_nothing_drawn(source: Path, drawing, notes: list[str]) -> None:
+    if drawing.missing:
+        missing = ", ".join(sorted(set(drawing.missing))[:4])
         notes.append(
-            f"{stem.name}: the schematic is drawn from the board netlist, not from "
-            f"{drawing.name}; symbols become boxes with one pin per pad")
+            f"{source.name}: the drawing is in child sheets that are not here "
+            f"({missing}); the schematic is drawn from the board netlist instead")
     else:
         notes.append(
-            f"{stem.name}: no {SCH_SUFFIX} alongside the board, so the schematic is "
-            f"drawn from the board netlist")
+            f"{source.name}: holds no wired-up drawing, so the schematic is drawn "
+            f"from the board netlist")
+
+
+def _note_drawn(source: Path, drawing, built, notes: list[str]) -> None:
+    notes.append(
+        f"{source.name}: schematic converted as drawn -- "
+        f"{len(built.instances)} symbols, {len(drawing.wires)} wires, "
+        f"{len(built.nets)} nets")
+    if drawing.missing:
+        missing = ", ".join(sorted(set(drawing.missing))[:4])
+        notes.append(f"{source.name}: child sheet(s) not found and left out "
+                     f"({missing})")
+    if built.unplaced:
+        notes.append(
+            f"{source.name}: {len(built.unplaced)} board net(s) are not drawn on "
+            f"the schematic and were added as labelled stubs")
+
+
+def _assemble_schematic(design: str, packages: dict[str, ET.Element],
+                        built) -> EagleDoc:
+    """Wrap the converted drawing in the document EAGLE expects."""
+    root, schematic = _shell("schematic", design, _SCH_LAYERS,
+                             packages, built.symbols, built.devicesets)
+    schematic.append(_libraries(design, packages, built.symbols, built.devicesets))
+    for tag_name in ("attributes", "variantdefs"):
+        node = ET.SubElement(schematic, tag_name)
+        node.tail = "\n"
+    schematic.append(_classes())
+
+    parts_node = ET.SubElement(schematic, "parts")
+    parts_node.text = "\n"
+    parts_node.tail = "\n"
+    for row in built.parts:
+        node = ET.SubElement(parts_node, "part", {
+            "name": row["name"], "library": design,
+            "deviceset": row["deviceset"], "device": row["device"]})
+        if row["value"]:
+            node.set("value", row["value"])
+        node.tail = "\n"
+
+    sheets = ET.SubElement(schematic, "sheets")
+    sheets.text = "\n"
+    sheets.tail = "\n"
+    sheet = ET.SubElement(sheets, "sheet")
+    sheet.text = "\n"
+    sheet.tail = "\n"
+    for tag_name in ("plain", "instances", "busses", "nets"):
+        holder = ET.SubElement(sheet, tag_name)
+        holder.text = "\n"
+        holder.tail = "\n"
+
+    for node in built.plain:
+        sheet.find("plain").append(node)
+    for node in built.instances:
+        sheet.find("instances").append(node)
+    for node in built.nets:
+        sheet.find("nets").append(node)
+    _stub_nets(sheet.find("nets"), built.unplaced)
+
+    return EagleDoc(path=Path(f"{design}.sch"),
+                    tree=ET.ElementTree(root), kind="sch")
+
+
+def _stub_nets(holder: ET.Element, names: list[str]) -> None:
+    """Give a board net the drawing never reached somewhere to exist.
+
+    EAGLE will not open a pair whose board carries a signal the schematic has
+    never heard of, so each one gets a short labelled wire off to the side.
+    They are the copper the drawing does not account for, and showing them is
+    better than a file that will not open.
+    """
+    for index, name in enumerate(names):
+        y = -index * 5.08
+        net = ET.SubElement(holder, "net", {"name": name, "class": "0"})
+        net.text = "\n"
+        net.tail = "\n"
+        segment = ET.SubElement(net, "segment")
+        segment.text = "\n"
+        segment.tail = "\n"
+        wire = ET.SubElement(segment, "wire", {
+            "x1": "-50.8", "y1": f"{y:.4g}", "x2": "-38.1", "y2": f"{y:.4g}",
+            "width": "0.1524", "layer": "91"})
+        wire.tail = "\n"
+        label = ET.SubElement(segment, "label", {
+            "x": "-50.8", "y": f"{y:.4g}", "size": "1.778", "layer": "95"})
+        label.tail = "\n"
 
 
 def _net_names(tree) -> dict[str, str]:
@@ -271,10 +392,21 @@ def _footprints(tree, design: str, nets: dict[str, str],
     return packages, parts
 
 
+# KiCad 8 moved a footprint's reference and value into `property`; before that
+# they were `fp_text` with a role.  Boards in the wild are both, and reading
+# only the newer form leaves every part on an older board unnamed.
+FP_TEXT_ROLES = {"Reference": "reference", "Value": "value"}
+
+
 def _property(node, name: str) -> str:
     for prop in sexp.children(node, "property"):
         if len(prop) > 2 and prop[1] == name:
             return str(prop[2])
+    role = FP_TEXT_ROLES.get(name)
+    if role:
+        for text in sexp.children(node, "fp_text"):
+            if len(text) > 2 and text[1] == role:
+                return str(text[2])
     return ""
 
 

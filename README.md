@@ -197,15 +197,27 @@ Net names are normalised so they can match. A hierarchical KiCad name like
 design's. Names KiCad invented, the `Net-(U1-Pad2)` form, become `N$1` and so are
 kept apart exactly as EAGLE's own anonymous nets are.
 
-**The schematic is drawn from the netlist**, not from the `.kicad_sch`. Each part
-becomes a box with one pin per pad, and connections are carried on net labels. It is
-not the drawing the engineer made and is not meant to be: it is a faithful, openable
-statement of the same connections, consistent with the board by construction. The
-merge says so in its report rather than leaving you to notice.
+**The schematic is the one that was drawn.** A `.kicad_sch` beside the board is
+converted as it stands: the symbols with their real outlines and pins, where each
+was placed including rotation and mirroring, every wire and junction, and the
+labels. Hierarchical child sheets are read too and laid out one below another,
+since the output is a single sheet.
 
-Converting a KiCad schematic drawing faithfully is a separate and much larger job:
-symbols, wires, buses, hierarchical labels and sheet pins all have to be redrawn in
-EAGLE's model. The netlist route gives a correct merge today.
+Two coordinate systems meet in that conversion and mixing them up is how you get a
+drawing that looks almost right. A KiCad **symbol** is stored y-up, exactly as
+EAGLE stores one, so symbol geometry crosses over untouched. A **sheet** is stored
+y-down, so placements, wires and labels have their y negated.
+
+**Nets still come from the board.** Connectivity is worked out from the drawing the
+way KiCad works it out, by following wires, junctions and pins, but each net takes
+its *name* from the board wherever a pin can be matched to a pad. The merged pair
+only opens if the schematic's nets and the board's signals agree, and a drawing that
+named its own nets would disagree on every unnamed one.
+
+When there is no usable drawing the old behaviour remains: the schematic is rebuilt
+from the board netlist as one box per part, with connections on labels. That happens
+when no `.kicad_sch` is published, or when the one published is a root sheet whose
+real content is in child files that were left out. The merge report says which.
 
 ## The problem it solves
 
@@ -690,8 +702,9 @@ pcbmerge check out/combo
 - Search covers the three vendor accounts only, and reads public repositories.
 - Designs are placed by hand as whole blocks. Moving one part within a
   design is a job for EAGLE, on the merged file.
-- A KiCad schematic's drawing is not converted. The schematic is rebuilt from the
-  board netlist as boxes with one pin per pad.
+- KiCad buses and bus entries are not converted; a wired connection is.
+- A KiCad design with no usable `.kicad_sch` still falls back to boxes drawn from
+  the board netlist.
 - KiCad copper pours come across as their outline polygons, not as the filled shape
   KiCad computed.
 - Design rules, autorouter settings and global attributes come from the first

@@ -143,10 +143,33 @@ These were each found by opening output in EAGLE. Do not undo them.
 ### KiCad conversion
 
 Happens in `load_designs` and nowhere else, so the rest of the engine only ever sees
-`EagleDoc`. The **board is the source of truth** — it holds the netlist, placement, copper
-and outline. The schematic is rebuilt from that netlist as one box per part with one pin per
-pad, which keeps the pair consistent by construction. It is deliberately not a conversion of
-the `.kicad_sch` drawing; the merge reports that it did this.
+`EagleDoc`. The **board is the source of truth for nets** — it holds the netlist,
+placement, copper and outline.
+
+`kicad_sch.py` converts the `.kicad_sch` when one is there: symbols with their real
+graphics, placements with rotation and mirroring, wires, junctions and labels, plus any
+child sheets found beside it. Connectivity is worked out from the geometry, but every net
+takes its **name from the board**, because the pair only opens if the schematic's nets and
+the board's signals agree.
+
+Three traps, each of which produces a file that looks nearly right:
+
+- **A symbol is y-up, a sheet is y-down.** Symbol geometry crosses over untouched;
+  everything sheet-level has its y negated. One flip too many draws every symbol upside
+  down inside a correctly placed outline.
+- **A placement angle belongs to the symbol's frame** and is carried across as-is. Settled
+  against a real file, not reasoned about.
+- **Unit 0 is what every unit shares, not a unit.** Most two-pin parts are drawn entirely
+  in unit 0 and placed as unit 1. Treat it as its own unit and those parts get no symbol,
+  no part, and pinrefs to a part that does not exist.
+
+With no usable drawing it falls back to one box per part with one pin per pad, built from
+the netlist, which keeps the pair consistent by construction. The merge report says which
+route it took and why.
+
+Footprint references and values are read from `property` **and** from `fp_text`. KiCad 8
+moved them; reading only the newer form leaves every part on an older board called `U$n`,
+which silently breaks the match between schematic and board.
 
 Translated rather than copied: Y is negated (KiCad counts down), so rotations change sign and
 back-side footprints mirror; arcs go from three points to an included angle; net names keep
