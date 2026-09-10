@@ -26,7 +26,8 @@ from pathlib import Path
 
 from . import kicad_sch, sexp
 from .eagle import (
-    EagleDoc, EagleError, design_stem, fmt, sanitize_name, unique_name, with_ext,
+    EagleDoc, EagleError, design_stem, fmt, parse_rot, sanitize_name, unique_name,
+    with_ext,
 )
 
 SCH_SUFFIX = ".kicad_sch"
@@ -87,22 +88,34 @@ def _xy(node, name: str = "at") -> tuple[float, float]:
 
 
 def _angle(node, name: str = "at") -> float:
-    """A KiCad rotation, in EAGLE's direction.
+    """A KiCad rotation, which is already EAGLE's direction.
 
-    Flipping Y turns a counterclockwise rotation into a clockwise one, so the
-    sign changes with it.
+    Reasoning said the sign should change with the Y flip.  Counting, on a
+    real board, which convention lands a rotated footprint's pads on the
+    tracks KiCad drew to them said otherwise: every pad of every footprint
+    turned a quarter landed with the angle carried across as it is, and none
+    landed with it negated.  KiCad's stored angles are, in effect, turns in
+    the y-up frame.  The angle of a pad or a label is stored absolute, so a
+    package takes the difference from its footprint's.
     """
     found = sexp.first(node, name)
     if found is None or len(found) < 4:
         return 0.0
-    return (-sexp.as_float(found[3])) % 360.0
+    return sexp.as_float(found[3]) % 360.0
 
 
 def _rot(angle: float, mirrored: bool = False) -> str | None:
-    if not angle and not mirrored:
-        return None
-    text = f"{'M' if mirrored else ''}R{fmt(angle)}"
-    return text
+    """EAGLE's rotation attribute for a footprint at `angle`.
+
+    A footprint on the back is stored by KiCad as the image seen from the
+    top, which is the library footprint mirrored top-to-bottom.  EAGLE puts a
+    package on the back by mirroring it left-to-right, and the two mirrors
+    differ by a half turn, so a back-side element turns a further 180.  The
+    package itself is built from the library image (see `_unmirror`).
+    """
+    if mirrored:
+        return f"MR{fmt((angle + 180.0) % 360.0)}"
+    return f"R{fmt(angle)}" if angle else None
 
 
 def _arc_curve(start: tuple[float, float], mid: tuple[float, float],
@@ -155,6 +168,7 @@ class _Part:
     angle: float
     mirrored: bool
     pads: list[tuple[str, str]] = field(default_factory=list)   # (pad, net)
+    labels: dict[str, kicad_sch.Label] = field(default_factory=dict)
 
 
 def convert(stem: Path) -> Converted:
@@ -367,9 +381,10 @@ def _footprints(tree, design: str, nets: dict[str, str],
         layer = sexp.value(node, "layer", default="F.Cu")
         mirrored = str(layer).startswith("B.")
         x, y = _xy(node)
+        angle = _angle(node)
 
         if package not in packages:
-            packages[package] = _package(node, package)
+            packages[package] = _package(node, package, angle, mirrored)
 
         pads: list[tuple[str, str]] = []
         for pad in sexp.children(node, "pad"):
@@ -384,7 +399,8 @@ def _footprints(tree, design: str, nets: dict[str, str],
         parts.append(_Part(
             ref=ref, value=_property(node, "Value") or "",
             library=design, package=package,
-            x=x, y=y, angle=_angle(node), mirrored=mirrored, pads=pads,
+            x=x, y=y, angle=angle, mirrored=mirrored, pads=pads,
+            labels=kicad_sch.read_labels(node, flip_y=True),
         ))
 
     if anonymous:
@@ -414,14 +430,21 @@ def _property(node, name: str) -> str:
 # packages
 # --------------------------------------------------------------------------
 
-def _package(node, name: str) -> ET.Element:
-    """One footprint's geometry, as an EAGLE package."""
+def _package(node, name: str, angle: float = 0.0, back: bool = False) -> ET.Element:
+    """One footprint's geometry, as an EAGLE package.
+
+    Built from whichever placement of the footprint comes first.  Its pads
+    and labels carry absolute angles, so the footprint's own is taken off;
+    and if that placement is on the back, KiCad has stored the mirror image,
+    which is turned back into the library footprint so a front placement of
+    the same package is right too.
+    """
     package = ET.Element("package", {"name": name})
     package.text = "\n"
     package.tail = "\n"
 
     for pad in sexp.children(node, "pad"):
-        shape = _pad(pad)
+        shape = _pad(pad, angle)
         if shape is not None:
             package.append(shape)
     for line in sexp.children(node, "fp_line"):
@@ -447,10 +470,48 @@ def _package(node, name: str) -> ET.Element:
             "x1": "0", "y1": "0", "x2": "0", "y2": "0",
             "width": DEFAULT_WIDTH, "layer": "21"})
         marker.tail = "\n"
+
+    # The name and value where the footprint draws them, relative to it.
+    for kind, layer in (("NAME", "25"), ("VALUE", "27")):
+        label = kicad_sch.read_labels(node, flip_y=True).get(kind)
+        if label is None:
+            continue
+        relative = (label.angle - angle) % 360.0
+        rot = f"R{fmt(relative)}" if relative else ""
+        text = kicad_sch.label_text(label, label.x, label.y, rot, layer)
+        text.tail = "\n"
+        package.append(text)
+
+    if back:
+        _unmirror(package)
     return package
 
 
-def _pad(pad) -> ET.Element | None:
+def _unmirror(package: ET.Element) -> None:
+    """Turn the image KiCad stores for a back-side footprint into the library one.
+
+    KiCad flips a footprint top-to-bottom, so what it stores for one on the
+    back is the library footprint with y negated.  Undoing that negates every
+    y, every turn and every arc, and leaves the package as the library drew
+    it, which is what EAGLE mirrors for itself.
+    """
+    for node in package.iter():
+        if not isinstance(node.tag, str):
+            continue
+        for key in ("y", "y1", "y2"):
+            value = node.get(key)
+            if value is not None:
+                node.set(key, fmt(-float(value)))
+        curve = node.get("curve")
+        if curve is not None:
+            node.set("curve", fmt(-float(curve)))
+        rot = node.get("rot")
+        if rot is not None:
+            flags, degrees = parse_rot(rot)
+            node.set("rot", f"{flags}R{fmt((-degrees) % 360.0)}")
+
+
+def _pad(pad, base: float = 0.0) -> ET.Element | None:
     name = str(pad[1]) if len(pad) > 1 else ""
     if not name:
         return None
@@ -460,7 +521,9 @@ def _pad(pad) -> ET.Element | None:
     size = sexp.first(pad, "size")
     width = sexp.as_float(size[1]) if size and len(size) > 1 else 0.5
     height = sexp.as_float(size[2]) if size and len(size) > 2 else 0.5
-    angle = _angle(pad)
+    # A pad's angle is stored absolute, so a package keeps only what the
+    # pad adds to its footprint's own turn.
+    angle = (_angle(pad) - base) % 360.0
 
     if kind == "smd":
         node = ET.Element("smd", {
@@ -715,11 +778,12 @@ def _build_board(tree, design: str, packages: dict[str, ET.Element],
         element = ET.SubElement(elements, "element", {
             "name": part.ref, "library": design, "package": part.package,
             "value": part.value, "x": fmt(part.x), "y": fmt(part.y),
-            "smashed": "no"})
+            "smashed": "yes" if part.labels else "no"})
         rotation = _rot(part.angle, part.mirrored)
         if rotation:
             element.set("rot", rotation)
         element.tail = "\n"
+        _label_attributes(element, part)
 
     signals = ET.SubElement(board, "signals")
     signals.text = "\n"
@@ -748,6 +812,34 @@ def _build_board(tree, design: str, packages: dict[str, ET.Element],
 
     doc = EagleDoc(path=Path(f"{design}.brd"), tree=ET.ElementTree(root), kind="brd")
     return doc
+
+
+def _label_attributes(element: ET.Element, part: _Part) -> None:
+    """The part's own label positions, as a smashed element carries them.
+
+    KiCad places every footprint's labels individually; EAGLE's word for
+    that is "smashed", with an attribute per label in board coordinates.
+    The label's position is relative to the footprint as stored, and what
+    is stored for a footprint on the back is already the image seen from
+    the top, so for either side the board position is the footprint's plus
+    the offset turned by the footprint's angle.
+    """
+    if not part.labels:
+        return
+    element.text = "\n"
+    turn = math.radians(part.angle)
+    for kind, (front, back) in (("NAME", ("25", "26")), ("VALUE", ("27", "28"))):
+        label = part.labels.get(kind)
+        if label is None:
+            continue
+        x = part.x + label.x * math.cos(turn) - label.y * math.sin(turn)
+        y = part.y + label.x * math.sin(turn) + label.y * math.cos(turn)
+        prefix = "M" if part.mirrored else ""
+        rot = f"{prefix}R{fmt(label.angle)}" if (label.angle or prefix) else ""
+        attribute = kicad_sch.label_attribute(
+            label, x, y, rot, back if part.mirrored else front)
+        attribute.tail = "\n"
+        element.append(attribute)
 
 
 def _rect_wires(node) -> list[ET.Element]:

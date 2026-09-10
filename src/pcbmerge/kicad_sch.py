@@ -57,6 +57,133 @@ SHEET_GAP = 25.4
 
 
 @dataclass
+class Label:
+    """Where a part's name or value is written, and how.
+
+    KiCad keeps a reference and a value on every symbol and every footprint,
+    each with its own position, angle, size and justification, and a flag
+    for the ones not shown.  EAGLE says the same with a `>NAME` or `>VALUE`
+    text in the symbol or package, and, for a placement that moved its
+    labels, a "smashed" instance or element carrying an `attribute` per
+    label with absolute coordinates.  Coordinates here are in whichever frame
+    the caller read them from; the angle is as KiCad stored it.
+    """
+
+    kind: str          # "NAME" or "VALUE"
+    x: float
+    y: float
+    angle: float
+    size: float
+    ratio: int
+    align: str
+    hidden: bool
+
+
+LABEL_KINDS = {"Reference": "NAME", "Value": "VALUE"}
+
+
+def read_labels(node, flip_y: bool = False, dx: float = 0.0, dy: float = 0.0) -> dict[str, Label]:
+    """The reference and value labels of a symbol or footprint.
+
+    KiCad 8 writes them as `property`; boards before it wrote footprint
+    labels as `fp_text reference` and `fp_text value`.  Both are read.
+    `flip_y` negates y, for a footprint whose frame counts y down; `dx`, `dy`
+    move a placed symbol's absolute labels along with its child sheet.
+    """
+    out: dict[str, Label] = {}
+    for prop in sexp.children(node, "property"):
+        if len(prop) > 2 and isinstance(prop[1], str) and prop[1] in LABEL_KINDS:
+            label = _label(LABEL_KINDS[prop[1]], prop, flip_y, dx, dy)
+            if label is not None:
+                out[label.kind] = label
+    if not out:
+        roles = {role: kind for name, role in (("Reference", "reference"), ("Value", "value"))
+                 for kind in (LABEL_KINDS[name],)}
+        for text in sexp.children(node, "fp_text"):
+            if len(text) > 2 and isinstance(text[1], str) and text[1] in roles:
+                label = _label(roles[text[1]], text, flip_y, dx, dy)
+                if label is not None:
+                    out[label.kind] = label
+    return out
+
+
+def _label(kind: str, node, flip_y: bool, dx: float, dy: float) -> Label | None:
+    at = sexp.first(node, "at")
+    if at is None or len(at) < 3:
+        return None
+    x = sexp.as_float(at[1]) + dx
+    y = sexp.as_float(at[2]) + dy
+    angle = sexp.as_float(at[3]) % 360.0 if len(at) > 3 else 0.0
+    size, ratio, align, hidden = text_effects(node)
+    return Label(kind, x, -y if flip_y else y, angle, size, ratio, align, hidden)
+
+
+def text_effects(node) -> tuple[float, int, str, bool]:
+    """Size, EAGLE ratio, EAGLE alignment and hiddenness of a KiCad text.
+
+    KiCad states a stroke width; EAGLE states it as a percentage of the
+    size.  KiCad justifies about the centre unless told otherwise; EAGLE's
+    default is bottom-left, so the centre has to be said.
+    """
+    size, thickness = 1.27, 0.0
+    horizontal, vertical = "center", "center"
+    hidden = "hide" in sexp.atoms(node)
+    effects = sexp.first(node, "effects")
+    if effects is not None:
+        font = sexp.first(effects, "font")
+        if font is not None:
+            found = sexp.first(font, "size")
+            if found is not None and len(found) > 2:
+                size = sexp.as_float(found[2], 1.27) or 1.27
+            thickness = sexp.number(font, "thickness", default=0.0)
+        justify = sexp.first(effects, "justify")
+        if justify is not None:
+            for atom in sexp.atoms(justify):
+                if atom in ("left", "right"):
+                    horizontal = atom
+                elif atom in ("top", "bottom"):
+                    vertical = atom
+        hide = sexp.first(effects, "hide")
+        if hide is not None and (len(hide) < 2 or str(hide[1]).lower() != "no"):
+            hidden = True
+        if "hide" in sexp.atoms(effects):
+            hidden = True
+    ratio = 8
+    if thickness > 0 and size > 0:
+        ratio = max(5, min(31, int(round(thickness / size * 100))))
+    align = "center" if (horizontal, vertical) == ("center", "center") \
+        else f"{vertical}-{horizontal}"
+    return size, ratio, align, hidden
+
+
+def label_text(label: Label, x: float, y: float, rot: str, layer: str) -> ET.Element:
+    """A `>NAME` or `>VALUE` text as a symbol or package draws it."""
+    attrs = {"x": _fmt(x), "y": _fmt(y), "size": _fmt(label.size), "layer": layer,
+             "ratio": str(label.ratio)}
+    if rot:
+        attrs["rot"] = rot
+    if label.align != "bottom-left":
+        attrs["align"] = label.align
+    node = _element("text", attrs)
+    node.text = f">{label.kind}"
+    return node
+
+
+def label_attribute(label: Label, x: float, y: float, rot: str,
+                    layer: str) -> ET.Element:
+    """The same label on one placement, with its own absolute position."""
+    attrs = {"name": label.kind, "x": _fmt(x), "y": _fmt(y), "size": _fmt(label.size),
+             "layer": layer, "ratio": str(label.ratio)}
+    if rot:
+        attrs["rot"] = rot
+    if label.align != "bottom-left":
+        attrs["align"] = label.align
+    if label.hidden:
+        attrs["display"] = "off"
+    return _element("attribute", attrs)
+
+
+@dataclass
 class Pin:
     """One pin of a library symbol, in the symbol's own coordinates."""
 
@@ -79,6 +206,7 @@ class Symbol:
     units: dict[int, list[ET.Element]] = field(default_factory=dict)
     pins: list[Pin] = field(default_factory=list)
     power: bool = False
+    labels: dict[str, Label] = field(default_factory=dict)   # symbol frame, y-up
 
     def pins_of(self, unit: int) -> list[Pin]:
         """Pins of one unit, plus the ones drawn in every unit (unit 0)."""
@@ -112,6 +240,7 @@ class Placed:
     angle: float
     mirror: str
     on_board: bool = False
+    labels: dict[str, Label] = field(default_factory=dict)   # sheet frame, y-down
 
 
 @dataclass
@@ -199,7 +328,8 @@ def _read_symbols(tree, drawing: Drawing) -> None:
 def _symbol(lib_id: str, node) -> Symbol:
     name = sanitize_name(lib_id.split(":")[-1]) or "SYMBOL"
     symbol = Symbol(lib_id=lib_id, name=name,
-                    power=sexp.first(node, "power") is not None)
+                    power=sexp.first(node, "power") is not None,
+                    labels=read_labels(node))
     for sub in sexp.children(node, "symbol"):
         unit = _unit_of(sub[1] if len(sub) > 1 else "", lib_id)
         shapes = symbol.units.setdefault(unit, [])
@@ -439,6 +569,8 @@ def _placement(node, drawing: Drawing, dx: float, dy: float) -> Placed | None:
         x=sexp.as_float(at[1]) + dx, y=sexp.as_float(at[2]) + dy,
         angle=sexp.as_float(at[3]) if len(at) > 3 else 0.0,
         mirror=(mirror[1] if mirror and len(mirror) > 1 else ""),
+        # A placed symbol's labels are in sheet coordinates already.
+        labels=read_labels(node, dx=dx, dy=dy),
     )
 
 
@@ -500,7 +632,8 @@ def build(drawing: Drawing, pads_of: dict[str, list[str]],
             shapes[(lib_id, unit)] = name
             mapping = _pin_names(pins)
             pin_names[(lib_id, unit)] = mapping
-            out.symbols[name] = _eagle_symbol(name, shapes_here, pins, mapping)
+            out.symbols[name] = _eagle_symbol(name, shapes_here, pins, mapping,
+                                              symbol.labels)
 
     for place in drawing.placed:
         key = (place.symbol.lib_id, place.unit)
@@ -526,10 +659,7 @@ def build(drawing: Drawing, pads_of: dict[str, list[str]],
         place.on_board = bool(package)
         out.parts.append({"name": part, "deviceset": deviceset,
                           "device": device, "value": place.value})
-        out.instances.append(_element("instance", {
-            "part": part, "gate": "G$1",
-            "x": _fmt(place.x), "y": _fmt(-place.y),
-            **_rotation(place)}))
+        out.instances.append(_instance(part, place))
         place.ref = part                       # what the pinrefs must now say
 
     out.plain = [_shift_y(node) for node in drawing.plain]
@@ -595,14 +725,53 @@ def _pin_names(pins: list[Pin]) -> dict[str, str]:
 
 
 def _eagle_symbol(name: str, shapes: list[ET.Element], pins: list[Pin],
-                  mapping: dict[str, str]) -> ET.Element:
+                  mapping: dict[str, str],
+                  labels: dict[str, Label] | None = None) -> ET.Element:
     node = ET.Element("symbol", {"name": name})
     node.text = "\n"
     node.tail = "\n"
     for shape in shapes:
         node.append(shape)
+    # The name and value where the library drew them, in the symbol's own
+    # y-up frame, on EAGLE's Names and Values layers.  Without these a part
+    # has a name in the parts list and nowhere on the sheet.
+    for kind, layer in (("NAME", "95"), ("VALUE", "96")):
+        label = (labels or {}).get(kind)
+        if label is None:
+            continue
+        rot = f"R{int(round(label.angle)) % 360}" if label.angle else ""
+        node.append(label_text(label, label.x, label.y, rot, layer))
     for pin in pins:
         node.append(_eagle_pin(pin, mapping.get(pin.number, f"P{pin.number}")))
+    return node
+
+
+def _instance(part: str, place: Placed) -> ET.Element:
+    """One placement, carrying its own label positions.
+
+    A KiCad symbol's labels are placed per instance, so every instance is
+    written "smashed", which is EAGLE's word for labels that no longer follow
+    the symbol, with an attribute per label in sheet coordinates.  Sheet
+    space is y-down and EAGLE's is not, so the y is turned here, as the
+    instance's own is.
+    """
+    rotation = _rotation(place)
+    node = _element("instance", {
+        "part": part, "gate": "G$1",
+        "x": _fmt(place.x), "y": _fmt(-place.y),
+        **({"smashed": "yes"} if place.labels else {}),
+        **rotation})
+    prefix = "M" if rotation.get("rot", "").startswith("M") else ""
+    for kind, layer in (("NAME", "95"), ("VALUE", "96")):
+        label = place.labels.get(kind)
+        if label is None:
+            continue
+        rot = f"{prefix}R{int(round(label.angle)) % 360}" if (label.angle or prefix) else ""
+        attribute = label_attribute(label, label.x, -label.y, rot, layer)
+        attribute.tail = "\n"
+        node.append(attribute)
+    if len(node):
+        node.text = "\n"
     return node
 
 
