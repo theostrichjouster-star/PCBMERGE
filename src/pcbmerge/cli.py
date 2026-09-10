@@ -12,7 +12,7 @@ from .eagle import EagleDoc, EagleError, design_stem, with_ext
 from . import sources
 from .libraries import LibraryMerger
 from .merge import build_resolver, load_designs, merge
-from .nets import Action, Kind, NetResolver
+from .nets import Action, Kind, NetResolver, explain
 from .plan import (
     DesignSpec, MergePlan, apply_plan, default_prefix, design_name, expand,
     plan_from_resolver,
@@ -150,7 +150,7 @@ def cmd_inspect(args: argparse.Namespace) -> int:
     for key, value in libs.stats().items():
         print(f"  {key:<14} {value}")
 
-    _print_nets(resolver, b, d, o, verbose=args.verbose)
+    _print_nets(resolver, b, d, o, verbose=args.verbose, designs=designs)
 
     suggestions = linking.suggest(resolver)
     print(f"\n{b}Possible connections between differently named nets{o}")
@@ -162,7 +162,8 @@ def cmd_inspect(args: argparse.Namespace) -> int:
     return 0
 
 
-def _print_nets(resolver: NetResolver, b: str, d: str, o: str, verbose: bool = False) -> None:
+def _print_nets(resolver: NetResolver, b: str, d: str, o: str, verbose: bool = False,
+                designs=None) -> None:
     joined = resolver.joined()
     questions = resolver.open_questions()
     replicas = resolver.replica_questions()
@@ -184,7 +185,9 @@ def _print_nets(resolver: NetResolver, b: str, d: str, o: str, verbose: bool = F
         spellings = " / ".join(group.spellings)
         print(f"  {spellings:<24} {group.source_count} designs   {d}{group.kind.value}{o}")
         if verbose:
-            print(f"    {d}{', '.join(group.sources)}{o}")
+            print(f"    {d}{explain(group.kind)}{o}")
+            for line in _evidence(group, designs or []):
+                print(f"    {d}{line}{o}")
 
     if replicas:
         print(f"\n{b}One per copy unless you say otherwise{o}")
@@ -195,6 +198,28 @@ def _print_nets(resolver: NetResolver, b: str, d: str, o: str, verbose: bool = F
     print(f"\n{b}Kept separate{o}")
     print(f"  {len(anonymous)} auto-generated name(s), "
           f"{len(unique)} name(s) used by one design only")
+
+
+def _evidence(group, designs) -> list[str]:
+    """What each design's copy of a net is wired to, one line per design.
+
+    A question with only a name on it cannot be answered; the pins say
+    whether two `VCC`s feed the same kind of thing.
+    """
+    from .web import PINS_SHOWN, pins_of
+
+    by_name = {d.name: d for d in designs}
+    lines: list[str] = []
+    for design, raws in group.occurrences.items():
+        loaded = by_name.get(design)
+        if loaded is None:
+            lines.append(design)
+            continue
+        pins = pins_of(loaded.sch, raws)
+        more = f" and {len(pins) - PINS_SHOWN} more" if len(pins) > PINS_SHOWN else ""
+        print_pins = ", ".join(pins[:PINS_SHOWN]) or "nothing"
+        lines.append(f"{design}: {print_pins}{more}")
+    return lines
 
 
 def cmd_plan(args: argparse.Namespace) -> int:
@@ -445,8 +470,9 @@ def _print_report(report, b: str, d: str, o: str) -> None:
     if report.placements:
         print(f"\n{b}Board placement{o}")
         for place in report.placements:
+            turned = f"  turned {place.rotation}" if place.rotation else ""
             print(f"  {place.design:<44} {place.width:7.2f} x {place.height:7.2f} mm  "
-                  f"at {place.x:8.2f}, {place.y:8.2f}")
+                  f"at {place.x:8.2f}, {place.y:8.2f}{turned}")
 
     if report.converted:
         print(f"\n{b}Converted from KiCad{o}")
@@ -464,7 +490,8 @@ def _print_report(report, b: str, d: str, o: str) -> None:
     if report.brd_path:
         print(f"  {report.brd_path}")
     print(f"\n{d}Open the board in EAGLE and run DRC; joined nets show as airwires "
-          f"between the sub-boards.{o}")
+          f"between the sub-boards.")
+    print(f"KiCad opens this pair as it is: File > Import > Non-KiCad Project.{o}")
 
 
 def cmd_search(args: argparse.Namespace) -> int:
@@ -611,21 +638,37 @@ def cmd_web(args: argparse.Namespace) -> int:
     if args.inputs:
         first = Path(args.inputs[0])
         start = str(first if first.is_dir() else first.parent)
+    plan = ""
+    if args.plan:
+        plan = str(Path(args.plan).expanduser().resolve())
+        if not Path(plan).is_file():
+            raise EagleError(f"{args.plan}: not found")
     web.serve(port=args.port, open_browser=not args.no_browser,
-              verbose=args.verbose, start=start)
+              verbose=args.verbose, start=start, plan=plan)
     return 0
 
 
-def cmd_check(args: argparse.Namespace) -> int:
+class Verdict:
+    """What `check` found: what is broken, what is merely worth knowing."""
+
+    def __init__(self, stem: Path, parts: int, elements: int, nets: int,
+                 problems: list[str], notes: list[str]):
+        self.stem = stem
+        self.parts, self.elements, self.nets = parts, elements, nets
+        self.problems, self.notes = problems, notes
+
+
+def check_pair(design: str | Path) -> Verdict:
     """Verify a .sch/.brd pair is internally consistent.
 
     Dangling references are real breakage.  A footprint that exists only on the
     board, or a part that exists only on the schematic, is ordinary in hand-drawn
     designs -- silkscreen labels, frames and mounting holes all look like that --
-    so those are reported separately and do not fail the check.
+    so those are reported separately and do not fail the check.  The web page
+    runs this on what it has just written; the `check` command runs it on
+    anything.
     """
-    b, d, o = _color(not args.no_color)
-    stem = Path(args.design)
+    stem = Path(design)
     if stem.suffix in (".sch", ".brd"):
         stem = design_stem(stem)
     sch = EagleDoc.load(with_ext(stem, ".sch"))
@@ -681,19 +724,26 @@ def cmd_check(args: argparse.Namespace) -> int:
 
     seen: set[str] = set()
     unique = [p for p in problems if not (p in seen or seen.add(p))]
+    return Verdict(stem, len(part_names), element_count, net_count, unique, notes)
 
-    print(f"{b}{stem.name}{o}")
-    print(f"  {len(part_names)} parts, {element_count} board elements, {net_count} nets")
-    for note in notes:
+
+def cmd_check(args: argparse.Namespace) -> int:
+    b, d, o = _color(not args.no_color)
+    verdict = check_pair(args.design)
+
+    print(f"{b}{verdict.stem.name}{o}")
+    print(f"  {verdict.parts} parts, {verdict.elements} board elements, "
+          f"{verdict.nets} nets")
+    for note in verdict.notes:
         print(f"  {d}{note}{o}")
-    if not unique:
+    if not verdict.problems:
         print(f"  {b}consistent{o}")
         return 0
-    print(f"  {len(unique)} problem(s):")
-    for problem in unique[:40]:
+    print(f"  {len(verdict.problems)} problem(s):")
+    for problem in verdict.problems[:40]:
         print(f"    {problem}")
-    if len(unique) > 40:
-        print(f"    ... and {len(unique) - 40} more")
+    if len(verdict.problems) > 40:
+        print(f"    ... and {len(verdict.problems) - 40} more")
     return 1
 
 
@@ -825,6 +875,7 @@ def build_parser() -> argparse.ArgumentParser:
                       help="do not open a browser window")
     site.add_argument("-v", "--verbose", action="store_true",
                       help="log every request")
+    site.add_argument("--plan", help="open a saved merge plan on start")
     site.set_defaults(func=cmd_web)
 
     vendors = ", ".join(s.org for s in sources.VENDORS)

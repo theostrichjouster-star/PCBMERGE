@@ -13,7 +13,7 @@ import random
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, replace, field
 
-from .eagle import bbox
+from .eagle import bbox, quarter_turns
 
 # EAGLE layer 20 is Dimension: the board outline lives there.
 DIMENSION_LAYER = "20"
@@ -23,6 +23,15 @@ STYLES = ("grid", "row", "column", "pack")
 
 @dataclass
 class Placement:
+    """Where one board lands: a turn about its own corner, then a shift.
+
+    `width` and `height` are the turned size, `x` and `y` the bottom-left
+    corner after placing, and `dx`, `dy` the shift that puts the turned
+    geometry there.  `transform` applies the whole thing to one point, so
+    everything that maps a board-local coordinate into the merged board goes
+    through the same arithmetic as the board itself.
+    """
+
     design: str
     dx: float
     dy: float
@@ -32,6 +41,20 @@ class Placement:
     y: float = 0.0   # bottom edge after placing
     column: int = 0
     row: int = 0
+    rotation: int = 0       # degrees counter-clockwise, a multiple of 90
+    pivot_x: float = 0.0    # the point the board turns about, in its own coordinates
+    pivot_y: float = 0.0
+
+    def transform(self, x: float, y: float) -> tuple[float, float]:
+        dx, dy = x - self.pivot_x, y - self.pivot_y
+        turns = quarter_turns(self.rotation)
+        if turns == 1:
+            dx, dy = -dy, dx
+        elif turns == 2:
+            dx, dy = -dx, -dy
+        elif turns == 3:
+            dx, dy = dy, -dx
+        return self.pivot_x + dx + self.dx, self.pivot_y + dy + self.dy
 
 
 @dataclass
@@ -82,13 +105,47 @@ def board_extent(board: ET.Element) -> tuple[float, float, float, float]:
 
 @dataclass
 class Board:
-    """One board instance waiting to be placed."""
+    """One board instance waiting to be placed, at some rotation.
+
+    The size and the corner describe the board as it will be laid out, which
+    is after any turn.  The pivot is the corner it was drawn with and turns
+    about, so a turned board can always be measured again upright.
+    """
 
     design: str
     width: float
     height: float
     min_x: float
     min_y: float
+    rotation: int = 0            # degrees counter-clockwise, a multiple of 90
+    pivot_x: float | None = None
+    pivot_y: float | None = None
+
+    def __post_init__(self) -> None:
+        # An upright board turns about its own corner unless told otherwise.
+        if self.pivot_x is None:
+            self.pivot_x = self.min_x
+        if self.pivot_y is None:
+            self.pivot_y = self.min_y
+
+    def turned(self, degrees: float) -> "Board":
+        """This board at the given rotation, measured from its upright size."""
+        turns = quarter_turns(degrees)
+        if quarter_turns(self.rotation) % 2:
+            width, height = self.height, self.width
+        else:
+            width, height = self.width, self.height
+        x, y = self.pivot_x, self.pivot_y
+        if turns == 1:
+            box = (x - height, y, height, width)
+        elif turns == 2:
+            box = (x - width, y - height, width, height)
+        elif turns == 3:
+            box = (x, y - width, height, width)
+        else:
+            box = (x, y, width, height)
+        return Board(self.design, box[2], box[3], box[0], box[1],
+                     turns * 90, x, y)
 
 
 def measure(boards: list[tuple[str, ET.Element]]) -> list[Board]:
@@ -97,6 +154,14 @@ def measure(boards: list[tuple[str, ET.Element]]) -> list[Board]:
         x1, y1, x2, y2 = board_extent(board)
         out.append(Board(name, x2 - x1, y2 - y1, x1, y1))
     return out
+
+
+def _placed(board: Board, x: float, y: float, column: int, row: int) -> Placement:
+    """A placement putting this board's corner at (x, y)."""
+    return Placement(board.design, x - board.min_x, y - board.min_y,
+                     board.width, board.height, x, y, column, row,
+                     rotation=board.rotation,
+                     pivot_x=board.pivot_x, pivot_y=board.pivot_y)
 
 
 def place(boards: list[Board], style: str = "grid", gap: float = 5.0,
@@ -136,8 +201,7 @@ def _grid(boards: list[Board], style: str, gap: float, columns: int,
         column, row = index % cols, index // cols
         x = origin[0] + column * cell_w
         y = origin[1] - row * cell_h
-        placements.append(Placement(board.design, x - board.min_x, y - board.min_y,
-                                    board.width, board.height, x, y, column, row))
+        placements.append(_placed(board, x, y, column, row))
     return placements
 
 
@@ -190,32 +254,37 @@ def _shelf(boards: list[Board], gap: float, origin: tuple[float, float],
     placements: list[Placement] = []
     for board, (px, py, row, column) in zip(boards, packed):
         x, y = origin[0] + px, origin[1] + py
-        placements.append(Placement(board.design, x - board.min_x, y - board.min_y,
-                                    board.width, board.height, x, y, column, row))
+        placements.append(_placed(board, x, y, column, row))
     return placements
 
 
 def pin(placements: list[Placement], boards: list[Board],
-        spots: dict[str, tuple[float, float]]) -> list[Placement]:
+        spots: dict[str, tuple]) -> list[Placement]:
     """Move named boards to exact positions and leave the rest where they are.
 
-    A placement carries both the translation applied to the board's geometry
-    and the edges that translation produces.  Setting one without the other
-    would draw a board in one place and write it out in another, so both are
-    recomputed from the board's own origin.
+    A spot is `(x, y)` or `(x, y, rotation)`; a spot without a rotation is an
+    upright board, which is what every plan written before boards could turn
+    means.  A placement carries both the translation applied to the board's
+    geometry and the edges that translation produces.  Setting one without
+    the other would draw a board in one place and write it out in another, so
+    the whole placement is recomputed from the board measured at that
+    rotation.
     """
     if not spots:
         return placements
-    origins = {b.design: (b.min_x, b.min_y) for b in boards}
+    upright = {b.design: b.turned(0) for b in boards}
     out: list[Placement] = []
     for place in placements:
         spot = spots.get(place.design)
-        if spot is None or place.design not in origins:
+        if spot is None or place.design not in upright:
             out.append(place)
             continue
-        x, y = spot
-        min_x, min_y = origins[place.design]
-        out.append(replace(place, x=x, y=y, dx=x - min_x, dy=y - min_y))
+        x, y, *rest = spot
+        board = upright[place.design].turned(rest[0] if rest else 0)
+        out.append(replace(
+            place, x=x, y=y, dx=x - board.min_x, dy=y - board.min_y,
+            width=board.width, height=board.height, rotation=board.rotation,
+            pivot_x=board.pivot_x, pivot_y=board.pivot_y))
     return out
 
 
@@ -241,12 +310,13 @@ def airwire_length(placements: list[Placement],
     tree over the board-local centroids of its pads.  That is the cheapest set
     of hops that could connect them, which is what a router would aim for.
     """
-    offsets = {p.design: (p.dx, p.dy) for p in placements}
+    placed = {p.design: p for p in placements}
     by_net: dict[str, list[tuple[float, float]]] = {}
     for design, nets in centroids.items():
-        dx, dy = offsets.get(design, (0.0, 0.0))
+        place = placed.get(design)
         for net, (x, y) in nets.items():
-            by_net.setdefault(net, []).append((x + dx, y + dy))
+            point = place.transform(x, y) if place else (x, y)
+            by_net.setdefault(net, []).append(point)
 
     total = 0.0
     for points in by_net.values():
@@ -299,20 +369,25 @@ def optimize(
     origin: tuple[float, float] = (0.0, 0.0),
     max_width: float = 0.0,
 ) -> tuple[list[Placement], LayoutStats, LayoutStats]:
-    """Search board orderings for a cheaper arrangement.
+    """Search board orderings and quarter turns for a cheaper arrangement.
 
     Returns the chosen placements plus the stats before and after, so the
-    caller can report what the search actually bought.
+    caller can report what the search actually bought.  A board is only ever
+    turned a quarter, never upside down: the quarter turn is what changes how
+    boards pack, and a board silently flipped for a millimetre of airwire is
+    a surprise nobody asked for.  A half turn is there for the hand.
     """
-    def lay(items: list[Board]) -> list[Placement]:
+    def lay(order: list[int], turns: list[int]) -> list[Placement]:
+        items = [boards[i].turned(turns[i]) for i in order]
         return place(items, style, gap, columns, origin, max_width)
 
     order = list(range(len(boards)))
-    baseline = lay([boards[i] for i in order])
+    turns = [0] * len(boards)
+    baseline = lay(order, turns)
     base_stats = stats(baseline, boards, centroids)
 
     weight_air, weight_area = WEIGHTS.get(goal, WEIGHTS["balanced"])
-    if goal == "none" or len(boards) < 3:
+    if goal == "none" or len(boards) < 2:
         return baseline, base_stats, base_stats
 
     def cost(measured: LayoutStats) -> float:
@@ -324,6 +399,7 @@ def optimize(
 
     rng = random.Random(seed)
     best_order = list(order)
+    best_turns = list(turns)
     best_stats = base_stats
     best_cost = cost(base_stats)
     improved = 0
@@ -331,25 +407,31 @@ def optimize(
     steps = max(0, iterations)
     for step in range(steps):
         trial = list(best_order)
-        if len(trial) > 3 and rng.random() < 0.3:
+        trial_turns = list(best_turns)
+        roll = rng.random()
+        if len(trial) > 3 and roll < 0.3:
             # Occasionally move one board instead of swapping two, which
             # reshuffles the shelves rather than just trading slots.
             src = rng.randrange(len(trial))
             item = trial.pop(src)
             trial.insert(rng.randrange(len(trial) + 1), item)
+        elif roll < 0.5:
+            which = rng.randrange(len(trial_turns))
+            trial_turns[which] = 90 - trial_turns[which]
         else:
             a, b = rng.sample(range(len(trial)), 2)
             trial[a], trial[b] = trial[b], trial[a]
 
-        candidate = lay([boards[i] for i in trial])
+        candidate = lay(trial, trial_turns)
         trial_stats = stats(candidate, boards, centroids)
         if cost(trial_stats) < best_cost - 1e-9:
             best_cost = cost(trial_stats)
             best_order = trial
+            best_turns = trial_turns
             best_stats = trial_stats
             improved += 1
 
-    final = lay([boards[i] for i in best_order])
+    final = lay(best_order, best_turns)
     best_stats = stats(final, boards, centroids)
     best_stats.iterations = steps
     best_stats.improved = improved

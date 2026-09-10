@@ -186,6 +186,21 @@
   .sub { color: var(--ink-faint); font-size: 11px; }
   .mono { font-family: var(--mono); font-size: 11.5px; }
 
+  /* A net question with its evidence: why it is being asked, and what each
+     design's copy of the net reaches.  The pins are the answer's raw material,
+     so they are always on show rather than behind a click. */
+  .question + .question { border-top: 1px solid var(--line-soft); }
+  .question .row { border-top: 0; padding-bottom: 2px; }
+  .question .why { color: var(--ink-faint); font-size: 11px; margin: 0 0 3px;
+                   line-height: 1.35; }
+  .question .pins { font-size: 11px; color: var(--ink-dim); margin: 0 0 6px;
+                    line-height: 1.4; }
+  .question .pins b { font-weight: 600; color: var(--ink-dim); }
+  .question .pins .mono { font-size: 10.5px; }
+  .question .pins .more { color: var(--ink-faint); }
+  .net-mark { fill: none; stroke: var(--accent); stroke-width: 2; }
+  .net-mark-core { fill: var(--accent); }
+
   label.field { display: block; margin: 10px 0 0; }
   label.field > span {
     display: block; margin-bottom: 4px; color: var(--ink-dim); font-size: 11px;
@@ -341,6 +356,12 @@
     cursor: pointer; transition: fill .18s;
   }
   .board-rect:hover, .board-rect.hot { fill: var(--body-lit); }
+  /* Inside the block: the board's own outline, and a dot for every part, so
+     a board is told from its shape and a connector from where it sits. */
+  .board-outline { fill: none; stroke: var(--maroon); stroke-width: 1;
+                   opacity: .85; pointer-events: none; }
+  .part-dot { fill: var(--ink-dim); opacity: .42; }
+  .part-dot:hover { fill: var(--accent); opacity: 1; }
   .board-label { fill: var(--maroon); font-size: 11px; font-family: var(--mono);
                  font-weight: 600; pointer-events: none; }
   .board-size { fill: var(--ink-faint); font-size: 9.5px; font-family: var(--mono);
@@ -362,6 +383,18 @@
   .block:focus-visible .board-rect { stroke: var(--blue); stroke-width: 2.4; }
   .block.pinned .board-rect { stroke: var(--accent); stroke-width: 1.9; }
   .pin-mark { fill: var(--accent); }
+
+  /* Several blocks can be chosen and moved as one.  A chosen block carries
+     handles at its corners; the box drawn to choose them is dashed in the
+     colour of connections, which is the one colour the stage does not
+     already use for a board or an outline. */
+  .block.selected .board-rect { stroke: var(--blue); stroke-width: 2.2; }
+  .handle { display: none; fill: #ffffff; stroke: var(--blue); stroke-width: 1.2; }
+  .block.selected .handle { display: block; }
+  .marquee { fill: rgba(30,66,159,.07); stroke: var(--blue); stroke-width: 1;
+             stroke-dasharray: 4 3; pointer-events: none; }
+  .corner-mark { fill: var(--maroon); opacity: .75; }
+  #canvas-wrap:focus { outline: none; }
 
   .stage-head .seg { margin-left: 4px; }
   .stage-head .stat.off { display: none; }
@@ -403,6 +436,19 @@
   .kv { display: grid; grid-template-columns: 1fr auto; gap: 2px 12px;
         font-size: 12px; margin: 8px 0; }
   .kv span:nth-child(even) { font-family: var(--mono); color: var(--ink-dim); }
+
+  /* After Merge: the verdict of the same check the command line runs, and
+     what to do next in whichever tool the person actually uses. */
+  .verdict { font-size: 12px; font-weight: 600; margin: 6px 0 2px; }
+  .verdict.ok { color: var(--green); }
+  .verdict.bad { color: var(--maroon); }
+  .next { margin-top: 10px; font-size: 11.5px; color: var(--ink-dim); line-height: 1.45; }
+  .next b { color: var(--ink); }
+  #outdir-note { margin-top: 6px; word-break: break-all; }
+  .plan-row { display: flex; gap: 6px; margin-top: 14px; align-items: center; }
+  .plan-row input { flex: 1; min-width: 0; }
+  #undo { margin-right: 12px; }
+  #resume { display: block; }
 </style>
 </head>
 <body>
@@ -417,12 +463,14 @@
       <button id="scan">Open</button>
     </div>
     <div class="grow"></div>
+    <button id="undo" class="small" title="Undo the last change (Ctrl+Z)" disabled>Undo</button>
     <div id="totals" class="sub mono"></div>
   </header>
 
   <main>
     <div class="controls" id="controls">
       <div id="error"></div>
+      <div class="ask" id="resume" style="display:none"></div>
 
       <section id="sec-find">
         <button class="head" data-toggle><span class="chev">▶</span>
@@ -511,12 +559,21 @@
             <label class="field"><span>Folder</span>
               <input id="o-outdir" type="text" value="out"></label>
           </div>
+          <div class="sub mono" id="outdir-note"></div>
           <label class="row" style="margin-top:10px">
             <input id="o-saveplan" type="checkbox" checked>
             <span class="name">Also save the decisions as a plan</span></label>
           <button id="merge" class="primary" style="width:100%;margin-top:12px" disabled>
             Merge</button>
           <div id="result"></div>
+          <div class="plan-row">
+            <button id="browse-plan" class="small" title="Open a saved plan">Open plan…</button>
+            <input id="plan-path" type="text" spellcheck="false"
+                   placeholder="or paste a plan's path">
+            <button id="open-plan" class="small">Open</button>
+          </div>
+          <p class="note">A plan holds every decision on this page. Open one to carry on
+            where it left off, with the same folder.</p>
         </div>
       </section>
     </div>
@@ -532,6 +589,8 @@
         <div class="stat wire" id="stat-3"><b id="s-air">—</b><span id="l-air">airwire</span></div>
         <div class="grow"></div>
         <div class="sub" id="hover-info"></div>
+        <button id="rotate" class="small"
+                title="Turn the chosen boards a quarter turn (R)" disabled>Rotate</button>
         <button id="auto" class="small" title="Let the packer place everything again"
                 disabled>Auto-place</button>
         <div class="seg" id="views">
@@ -539,7 +598,7 @@
           <button data-view="sheet">Schematic</button>
         </div>
       </div>
-      <div class="canvas-wrap" id="canvas-wrap">
+      <div class="canvas-wrap" id="canvas-wrap" tabindex="-1">
         <div class="placeholder" id="placeholder">
           <b>No designs open</b>
           <div>Choose the folder holding your .sch and .brd files.</div>
@@ -580,12 +639,19 @@ const state = {
   links: [],
   decisions: {},
   folder: "",           // the project folder open, and where imports land
-  positions: [],        // {design, view, x, y} for anything placed by hand
+  positions: [],        // {design, view, x, y, rotation} for anything placed by hand
   view: "board",
   focus: null,          // design to hand focus back to after a redraw
+  selected: new Set(),  // designs chosen in the current view, moved together
   data: null,
   hotNet: null,
 };
+
+// What is drawn right now: the conversions the canvas was drawn with, and
+// the block for each design, so a selection can be painted and a box drawn
+// on the canvas can be measured against the blocks in millimetres.
+let canvas = null;
+const blocks = new Map();
 
 // What a nudge or a drop rounds to. A board is dimensioned in millimetres; a
 // schematic is drawn on EAGLE's tenth-of-an-inch grid, so each snaps to its own.
@@ -621,8 +687,28 @@ function showError(message) {
   if (message) $("error").append(el("div", "err", message));
 }
 
+function options() {
+  return {
+    outline: $("o-outline").value.trim() || "150x100",
+    gap: parseFloat($("o-gap").value) || 0,
+    layout: $("o-layout").value,
+    optimize: $("o-optimize").value,
+    default: "split",
+    replicas: "split",
+  };
+}
+
+function setOptions(given) {
+  if (!given) return;
+  if (given.outline) $("o-outline").value = given.outline;
+  if (given.gap !== undefined && given.gap !== null) $("o-gap").value = given.gap;
+  if (given.layout) $("o-layout").value = given.layout;
+  if (given.optimize) $("o-optimize").value = given.optimize;
+}
+
 function payload() {
   return {
+    folder: state.folder,
     designs: state.designs,
     drops: state.drops,
     connections: state.connections,
@@ -632,15 +718,199 @@ function payload() {
     output: $("o-output").value.trim() || "merged",
     outDir: $("o-outdir").value.trim() || "out",
     savePlan: $("o-saveplan").checked,
-    options: {
-      outline: $("o-outline").value.trim() || "150x100",
-      gap: parseFloat($("o-gap").value) || 0,
-      layout: $("o-layout").value,
-      optimize: $("o-optimize").value,
-      default: "split",
-      replicas: "split",
-    },
+    options: options(),
   };
+}
+
+// ------------------------------------------------------- not losing the work
+
+// Everything on the page that someone decided, as one string.  It is what
+// undo steps back through, what a draft keeps between visits, and what a plan
+// is turned into when one is opened.
+function snapshot() {
+  return JSON.stringify({
+    designs: state.designs, drops: state.drops, connections: state.connections,
+    links: state.links, decisions: state.decisions, positions: state.positions,
+    options: options(), output: $("o-output").value, outDir: $("o-outdir").value,
+  });
+}
+
+function restore(text) {
+  const saved = JSON.parse(text);
+  state.designs = saved.designs || [];
+  state.drops = saved.drops || [];
+  state.connections = saved.connections || [];
+  state.links = saved.links || [];
+  state.decisions = saved.decisions || {};
+  state.positions = saved.positions || [];
+  state.selected = new Set();
+  setOptions(saved.options);
+  if (saved.output) $("o-output").value = saved.output;
+  if (saved.outDir) $("o-outdir").value = saved.outDir;
+}
+
+/** The last few states, so a wrong click is one key away from undone.
+
+    A state is pushed when the next change is about to be sent, and only if
+    it differs from what was last drawn, so held-down arrows and a redraw of
+    the same thing do not fill the history with copies. */
+const history = [];
+let lastGood = null;
+
+function noteChange() {
+  const now = snapshot();
+  if (lastGood !== null && now !== lastGood) {
+    history.push(lastGood);
+    if (history.length > 60) history.shift();
+  }
+  $("undo").disabled = !history.length;
+}
+
+function undo() {
+  if (!history.length) return;
+  const text = history.pop();
+  restore(text);
+  lastGood = text;
+  $("undo").disabled = !history.length;
+  renderDesigns();
+  outdirNote();
+  analyze();
+}
+
+function forgetHistory() {
+  history.length = 0;
+  lastGood = null;
+  $("undo").disabled = true;
+}
+
+// A draft per folder, kept in this browser, so closing the tab does not
+// throw away an afternoon of decisions.  It is offered back, not imposed:
+// someone reopening a folder may want exactly the clean start they get.
+const DRAFT = "pcbmerge.draft:";
+
+// While a draft is on offer, the fresh scan that prompted the offer must not
+// overwrite it, or reloading the page once more would lose it unanswered.
+let draftOffered = false;
+
+function saveDraft() {
+  if (!state.folder || draftOffered) return;
+  try { localStorage.setItem(DRAFT + state.folder, snapshot()); } catch (err) { /* fine */ }
+}
+
+function draftFor(folder) {
+  try { return localStorage.getItem(DRAFT + folder); } catch (err) { return null; }
+}
+
+function forgetDraft(folder) {
+  try { localStorage.removeItem(DRAFT + folder); } catch (err) { /* fine */ }
+}
+
+/** Whether a draft holds anything a fresh scan would not. */
+function draftMatters(text) {
+  try {
+    const saved = JSON.parse(text);
+    return Boolean(
+      (saved.drops || []).length || (saved.connections || []).length
+      || (saved.links || []).length || Object.keys(saved.decisions || {}).length
+      || (saved.positions || []).length
+      || (saved.designs || []).some((d) => !d.use || d.count > 1));
+  } catch (err) {
+    return false;
+  }
+}
+
+function offerDraft(folder) {
+  const host = $("resume");
+  host.style.display = "none";
+  draftOffered = false;
+  const draft = draftFor(folder);
+  if (!draft || !draftMatters(draft)) return;
+  // Only a draft about the designs that are actually here is worth offering.
+  const here = new Set(state.designs.map((d) => d.sch));
+  const saved = JSON.parse(draft);
+  if (!(saved.designs || []).every((d) => here.has(d.sch))) { forgetDraft(folder); return; }
+
+  host.innerHTML = "";
+  host.style.display = "block";
+  draftOffered = true;
+  host.append(el("div", null,
+    "You were working on this folder before. Carry on where you left off, "
+    + "with the counts, decisions and placements you had?"));
+  const yes = el("button", "primary", "Restore");
+  yes.onclick = () => {
+    draftOffered = false;
+    restore(draft);
+    forgetHistory();
+    host.style.display = "none";
+    renderDesigns();
+    outdirNote();
+    analyze();
+  };
+  const no = el("button", "small", "Start fresh");
+  no.onclick = () => {
+    draftOffered = false;
+    forgetDraft(folder);
+    host.style.display = "none";
+    saveDraft();
+  };
+  no.style.marginLeft = "8px";
+  host.append(yes, no);
+}
+
+// ---------------------------------------------------------- a saved plan
+
+async function openPlan(path) {
+  busy(true);
+  try {
+    const data = path
+      ? await post("/api/plan", { path })
+      : await post("/api/browse-plan", {});
+    if (data.cancelled) return;
+    applyPlan(data);
+    await analyze();
+  } catch (err) {
+    showError(err.message);
+  } finally {
+    if (!state.data) busy(false);
+  }
+}
+
+/** Take in everything a plan holds, the way `adopt` takes in a folder. */
+function applyPlan(data) {
+  state.designs = data.designs;
+  state.drops = data.drops || [];
+  state.connections = data.connections || [];
+  state.links = data.links || [];
+  state.decisions = data.decisions || {};
+  state.positions = data.positions || [];
+  state.selected = new Set();
+  state.folder = data.folder;
+  $("path").value = data.folder;
+  $("plan-path").value = data.plan || "";
+  setOptions(data.options);
+  if (data.output) $("o-output").value = data.output;
+  forgetHistory();
+  $("resume").style.display = "none";
+  showError(data.missing && data.missing.length
+    ? `The plan names designs that are not in the folder any more: ${data.missing.join(", ")}`
+    : "");
+  renderDesigns();
+  outdirNote();
+  $("merge").disabled = false;
+  renderResults();
+}
+
+/** Say where a merge will land, since "out" alone could be anywhere. */
+function outdirNote() {
+  const raw = $("o-outdir").value.trim() || "out";
+  const absolute = /^([A-Za-z]:[\\/]|[\\/]|~)/.test(raw);
+  let where;
+  if (absolute) where = raw;
+  else if (state.folder) {
+    const sep = state.folder.includes("\\") ? "\\" : "/";
+    where = state.folder.replace(/[\\/]+$/, "") + sep + raw;
+  } else where = `${raw}, beside wherever the server was started`;
+  $("outdir-note").textContent = `Writes to ${where}`;
 }
 
 function busy(on) {
@@ -662,12 +932,15 @@ function schedule() {
 
 async function analyze() {
   if (!state.designs.some((d) => d.use)) return;
+  noteChange();
   const mine = ++seq;
   busy(true);
   try {
     const data = await post("/api/analyze", payload());
     if (mine !== seq) return;           // a newer edit already won
     state.data = data;
+    lastGood = snapshot();
+    saveDraft();
     showError("");
     render();
   } catch (err) {
@@ -686,12 +959,17 @@ function adopt(data) {
   state.links = [];
   state.decisions = {};
   state.positions = [];
+  state.selected = new Set();
   state.folder = data.folder;
   $("path").value = data.folder;
+  $("plan-path").value = "";
+  forgetHistory();
   showError("");
   renderDesigns();
+  outdirNote();
   $("merge").disabled = false;
   renderResults();
+  offerDraft(data.folder);
 }
 
 /** Take in a rescan of the folder already open, keeping what was set on it.
@@ -1146,25 +1424,46 @@ function netRow(net, opts) {
   row.append(name);
   row.append(el("span", "chip " + net.kind, net.kind));
 
-  if (opts.decide) {
-    const seg = el("div", "seg");
-    const join = el("button", net.action === "join" ? "on" : "", "join");
-    const split = el("button", net.action === "split" ? "on split" : "", "split");
-    join.onclick = () => {
-      state.decisions[net.key] = { action: "join", name: net.display };
-      schedule();
-    };
-    split.onclick = () => {
-      state.decisions[net.key] = { action: "split" };
-      schedule();
-    };
-    seg.append(join, split);
-    row.append(seg);
+  if (!opts.decide) {
+    row.onmouseenter = () => setHot(net.name, net.key);
+    row.onmouseleave = () => setHot(null);
+    return row;
   }
 
-  row.onmouseenter = () => setHot(net.name);
-  row.onmouseleave = () => setHot(null);
-  return row;
+  const seg = el("div", "seg");
+  const join = el("button", net.action === "join" ? "on" : "", "join");
+  const split = el("button", net.action === "split" ? "on split" : "", "split");
+  join.onclick = () => {
+    state.decisions[net.key] = { action: "join", name: net.display };
+    schedule();
+  };
+  split.onclick = () => {
+    state.decisions[net.key] = { action: "split" };
+    schedule();
+  };
+  seg.append(join, split);
+  row.append(seg);
+
+  // The question with its evidence under it: why it is asked, and what
+  // each design's copy reaches, which is what the answer is made from.
+  const box = el("div", "question");
+  box.append(row);
+  if (net.reason) box.append(el("div", "why", net.reason));
+  const pins = el("div", "pins");
+  Object.entries(net.pins || {}).forEach(([design, found]) => {
+    const line = el("div");
+    line.append(el("b", null, design + ": "));
+    line.append(el("span", "mono", found.shown.join(", ") || "nothing"));
+    if (found.count > found.shown.length) {
+      line.append(el("span", "more", ` and ${found.count - found.shown.length} more`));
+    }
+    pins.append(line);
+  });
+  if (pins.children.length) box.append(pins);
+
+  box.onmouseenter = () => setHot(net.name, net.key);
+  box.onmouseleave = () => setHot(null);
+  return box;
 }
 
 function renderNets() {
@@ -1289,12 +1588,23 @@ function renderConnect() {
 
 // -------------------------------------------------------------------- canvas
 
-function setHot(net) {
+/** Light a net on the canvas: its airwire if it has one, and a mark on
+    every board it touches if it does not yet, which is what a question
+    net is until it is joined. */
+function setHot(net, key) {
   state.hotNet = net;
   document.querySelectorAll(".airwire").forEach((wire) => {
     wire.classList.toggle("hot", net !== null && wire.dataset.net === net);
   });
-  $("hover-info").textContent = net ? `net ${net}` : "";
+  document.querySelectorAll(".net-mark, .net-mark-core").forEach((m) => m.remove());
+  const marks = key && state.view === "board" && state.data && canvas
+    ? (state.data.board.marks || {})[key] || [] : [];
+  marks.forEach((m) => {
+    canvas.add("circle", { cx: canvas.sx(m.x), cy: canvas.sy(m.y), r: 7 }, "net-mark");
+    canvas.add("circle", { cx: canvas.sx(m.x), cy: canvas.sy(m.y), r: 2 }, "net-mark-core");
+  });
+  const where = marks.length ? ` · on ${count(marks.length, "board")}` : "";
+  $("hover-info").textContent = net ? `net ${net}${where}` : "";
 }
 
 // ------------------------------------------------------------ hand placement
@@ -1303,11 +1613,13 @@ function pinOf(view, design) {
   return state.positions.find((p) => p.view === view && p.design === design);
 }
 
-function pinTo(view, design, x, y) {
+function pinTo(view, design, x, y, rotation) {
   const round = (v) => Math.round(v * 100) / 100;
+  // A drawing never turns; a board turns by quarters, whichever way round.
+  const turn = view === "board" ? (((rotation || 0) % 360) + 360) % 360 : 0;
   const found = pinOf(view, design);
-  if (found) { found.x = round(x); found.y = round(y); }
-  else state.positions.push({ view, design, x: round(x), y: round(y) });
+  if (found) { found.x = round(x); found.y = round(y); found.rotation = turn; }
+  else state.positions.push({ view, design, x: round(x), y: round(y), rotation: turn });
 }
 
 function release(view, design) {
@@ -1327,55 +1639,266 @@ function pinnedIn(view) {
     rather than all measuring from the same stale corner. */
 function nowAt(view, item) {
   const pin = pinOf(view, item.design);
-  return pin ? { x: pin.x, y: pin.y } : { x: item.x, y: item.y };
+  return pin ? { x: pin.x, y: pin.y, rotation: pin.rotation || 0 }
+             : { x: item.x, y: item.y, rotation: item.rotation || 0 };
 }
 
-/** Make one drawn block movable, by pointer and by keyboard.
+/** A block's sides as they stand, which swap with every quarter turn.
 
-    A drag alone would leave the arrangement out of reach of anyone not using
-    a mouse, so the same block takes arrow keys, and Delete hands it back to
-    the packer.  During a drag only the block itself moves; the airwires it
-    changes are recomputed on the server when it lands. */
+    The block was drawn at the rotation the server last reported; a turn
+    pressed since then is held in the pin, and until the server answers the
+    drawn sides are the wrong way round. */
+function sidesNow(item, at) {
+  const turned = (((at.rotation - (item.rotation || 0)) / 90) % 2 + 2) % 2;
+  return turned ? { width: item.height, height: item.width }
+                : { width: item.width, height: item.height };
+}
+
+// ------------------------------------------------------------------ selection
+
+function itemsIn(view) {
+  if (!state.data) return [];
+  return view === "sheet" ? state.data.sheet.blocks : state.data.board.placements;
+}
+
+/** The chosen blocks in this view, in the order they were drawn. */
+function selectedItems(view) {
+  return itemsIn(view).filter((item) => {
+    const drawn = blocks.get(item.design);
+    return drawn && drawn.movable && state.selected.has(item.design);
+  });
+}
+
+function select(designs, mode) {
+  if (mode === "only") state.selected = new Set(designs);
+  else if (mode === "add") designs.forEach((d) => state.selected.add(d));
+  else designs.forEach((d) => {
+    if (state.selected.has(d)) state.selected.delete(d); else state.selected.add(d);
+  });
+  paintSelection();
+}
+
+function clearSelection() {
+  if (!state.selected.size) return;
+  state.selected.clear();
+  paintSelection();
+}
+
+/** Show the selection on the blocks that are drawn, and on the controls. */
+function paintSelection() {
+  blocks.forEach(({ group }, design) => {
+    const on = state.selected.has(design);
+    group.classList.toggle("selected", on);
+    group.setAttribute("aria-pressed", on ? "true" : "false");
+  });
+  const chosen = selectedItems(state.view).length;
+  $("rotate").disabled = state.view !== "board" || chosen === 0;
+  if (chosen > 1) $("hover-info").textContent = `${chosen} selected`;
+  else if (chosen === 0) $("hover-info").textContent = "";
+}
+
+/** Choose every block a box drawn on the canvas touches.
+
+    A pointer that goes down on empty canvas and moves draws the box; one that
+    goes down and comes straight back up chooses nothing, which is how a
+    selection is dropped without reaching for the keyboard. */
+function startMarquee(event) {
+  if (event.button !== 0 || !canvas) return;
+  if (event.target.closest && event.target.closest(".block")) return;
+  event.preventDefault();
+  const svg = $("canvas");
+  const box = svg.getBoundingClientRect();
+  const x0 = event.clientX - box.left, y0 = event.clientY - box.top;
+  const additive = event.ctrlKey || event.metaKey || event.shiftKey;
+  let rect = null;
+  try { svg.setPointerCapture(event.pointerId); } catch (err) { /* fine */ }
+
+  svg.onpointermove = (move) => {
+    const x1 = move.clientX - box.left, y1 = move.clientY - box.top;
+    if (!rect) {
+      if (Math.abs(x1 - x0) < 3 && Math.abs(y1 - y0) < 3) return;
+      rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+      rect.setAttribute("class", "marquee");
+      svg.append(rect);
+    }
+    rect.setAttribute("x", Math.min(x0, x1));
+    rect.setAttribute("y", Math.min(y0, y1));
+    rect.setAttribute("width", Math.abs(x1 - x0));
+    rect.setAttribute("height", Math.abs(y1 - y0));
+  };
+
+  const done = (up) => {
+    svg.onpointermove = null;
+    svg.onpointerup = null;
+    svg.onpointercancel = null;
+    try { svg.releasePointerCapture(up.pointerId); } catch (err) { /* gone */ }
+    $("canvas-wrap").focus({ preventScroll: true });
+    if (!rect) {
+      if (!additive) clearSelection();
+      return;
+    }
+    rect.remove();
+    const x1 = up.clientX - box.left, y1 = up.clientY - box.top;
+    const left = canvas.wx(Math.min(x0, x1)), right = canvas.wx(Math.max(x0, x1));
+    const bottom = canvas.wy(Math.max(y0, y1)), top = canvas.wy(Math.min(y0, y1));
+    const hit = [];
+    blocks.forEach(({ item, movable }, design) => {
+      if (!movable) return;
+      const at = nowAt(state.view, item);
+      const sides = sidesNow(item, at);
+      if (at.x < right && left < at.x + sides.width
+          && at.y < top && bottom < at.y + sides.height) hit.push(design);
+    });
+    select(hit, additive ? "add" : "only");
+  };
+  svg.onpointerup = done;
+  svg.onpointercancel = done;
+}
+
+/** Turn the chosen boards a quarter, counter-clockwise, as one rigid body.
+
+    The group turns about the centre of its own bounding box, so an
+    arrangement someone made keeps its shape; each board's sides swap and its
+    corner is measured again from where its centre lands.  One board turns
+    about its own centre, which is the same rule with a group of one. */
+function rotateSelection() {
+  if (state.view !== "board") return;
+  const members = selectedItems("board").map((item) => {
+    const at = nowAt("board", item);
+    return { item, at, sides: sidesNow(item, at) };
+  });
+  if (!members.length) return;
+  const step = SNAP.board;
+  const snap = (v) => Math.round(v / step) * step;
+  const left = Math.min(...members.map((m) => m.at.x));
+  const right = Math.max(...members.map((m) => m.at.x + m.sides.width));
+  const bottom = Math.min(...members.map((m) => m.at.y));
+  const top = Math.max(...members.map((m) => m.at.y + m.sides.height));
+  const gx = (left + right) / 2, gy = (bottom + top) / 2;
+
+  members.forEach(({ item, at, sides }) => {
+    const cx = at.x + sides.width / 2, cy = at.y + sides.height / 2;
+    const nx = gx - (cy - gy), ny = gy + (cx - gx);
+    pinTo("board", item.design, snap(nx - sides.height / 2), snap(ny - sides.width / 2),
+          at.rotation + 90);
+  });
+  state.focus = members[0].item.design;
+  analyze();
+}
+
+/** Every key the canvas answers, for the block in focus and the selection.
+
+    The arrows move, Delete hands back to the packer, R turns, Escape drops
+    the selection and Ctrl+A takes everything.  A key acts on the selection;
+    a block that has focus but is not chosen is chosen first, so tabbing to
+    a block and pressing an arrow still moves that block alone. */
+function canvasKeys(event) {
+  const view = state.view;
+  const focused = event.target.closest ? event.target.closest(".block") : null;
+  const focusedDesign = focused ? focused.dataset.design : null;
+
+  if (event.key === "Escape") { clearSelection(); return; }
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "a") {
+    event.preventDefault();
+    select([...blocks.entries()].filter(([, b]) => b.movable).map(([d]) => d), "only");
+    return;
+  }
+
+  if (focusedDesign && !state.selected.has(focusedDesign)) select([focusedDesign], "only");
+  const targets = selectedItems(view);
+  if (!targets.length) return;
+
+  if (event.key === "r" || event.key === "R") {
+    if (view === "board") { event.preventDefault(); rotateSelection(); }
+    return;
+  }
+  if (event.key === "Delete" || event.key === "Backspace") {
+    event.preventDefault();
+    state.focus = focusedDesign;
+    targets.forEach((t) => release(view, t.design));
+    analyze();
+    return;
+  }
+
+  const step = (event.shiftKey ? 10 : 1) * SNAP[view];
+  let dx = 0, dy = 0;
+  if (event.key === "ArrowLeft") dx = -step;
+  else if (event.key === "ArrowRight") dx = step;
+  else if (event.key === "ArrowUp") dy = step;
+  else if (event.key === "ArrowDown") dy = -step;
+  else return;
+  event.preventDefault();
+  state.focus = focusedDesign;
+  targets.forEach((t) => {
+    const at = nowAt(view, t);
+    pinTo(view, t.design, at.x + dx, at.y + dy, at.rotation);
+  });
+  const lead = nowAt(view, targets[0]);
+  $("hover-info").textContent = targets.length > 1
+    ? `${targets.length} selected · moved ${dx >= 0 ? "+" : ""}${dx}, ${dy >= 0 ? "+" : ""}${dy} mm`
+    : `${targets[0].design} · ${lead.x.toFixed(1)}, ${lead.y.toFixed(1)} mm`;
+  // Held-down arrows coalesce into one request rather than one each.
+  schedule();
+}
+
+/** Make one drawn block movable by pointer, alone or with the selection.
+
+    A press that does not move chooses the block (with Ctrl or Shift, adds
+    or removes it).  A press that moves drags every chosen block by the same
+    distance, snapped as a group so their arrangement is kept; a block not
+    yet chosen is chosen first, so the old one-block drag is unchanged.
+    During a drag only the blocks move; the airwires they change are
+    recomputed on the server when they land.  The keyboard is handled once,
+    for the whole canvas, in canvasKeys. */
 function movable(group, view, item, k) {
   const svg = $("canvas");
   group.setAttribute("tabindex", "0");
   group.setAttribute("role", "button");
   group.setAttribute("aria-label",
-    `${item.design}, ${item.x.toFixed(1)} by ${item.y.toFixed(1)} millimetres. ` +
-    `Drag or use the arrow keys to place it.`);
-
-  const say = (x, y) => {
-    $("hover-info").textContent =
-      `${item.design} · ${x.toFixed(1)}, ${y.toFixed(1)} mm`;
-  };
+    `${item.design}, ${item.x.toFixed(1)} by ${item.y.toFixed(1)} millimetres` +
+    (item.rotation ? `, turned ${item.rotation} degrees` : "") +
+    `. Drag or use the arrow keys to place it` +
+    (view === "board" ? ", R to turn it." : "."));
 
   group.onpointerdown = (event) => {
     if (event.button !== 0) return;
     event.preventDefault();
+    event.stopPropagation();            // the canvas would start a box
     group.focus();
+    const additive = event.ctrlKey || event.metaKey || event.shiftKey;
+    const wasChosen = state.selected.has(item.design);
+    if (!wasChosen) select([item.design], additive ? "add" : "only");
     group.setPointerCapture(event.pointerId);
-    group.classList.add("held");
-    svg.classList.add("dragging");
 
     const fromX = event.clientX, fromY = event.clientY;
-    const from = nowAt(view, item);
-    let moved = false, atX = from.x, atY = from.y;
+    const mine = nowAt(view, item);
+    const members = selectedItems(view).map((member) => ({
+      item: member, at: nowAt(view, member), group: blocks.get(member.design).group,
+    }));
+    let moved = false, deltaX = 0, deltaY = 0;
 
     group.onpointermove = (move) => {
       const dx = move.clientX - fromX, dy = move.clientY - fromY;
       if (!moved && Math.abs(dx) < 3 && Math.abs(dy) < 3) return;
-      moved = true;
-      let x = from.x + dx / k;
-      let y = from.y - dy / k;              // the screen counts y the other way
+      if (!moved) {
+        moved = true;
+        group.classList.add("held");
+        svg.classList.add("dragging");
+      }
+      let x = mine.x + dx / k;
+      let y = mine.y - dy / k;              // the screen counts y the other way
       if (!move.shiftKey) {
         const step = SNAP[view];
         x = Math.round(x / step) * step;
         y = Math.round(y / step) * step;
       }
-      atX = x; atY = y;
-      group.setAttribute("transform",
-        `translate(${(x - item.x) * k} ${-(y - item.y) * k})`);
-      say(x, y);
+      // The block under the pointer snaps; the rest keep their distance to it.
+      deltaX = x - mine.x; deltaY = y - mine.y;
+      members.forEach((m) => m.group.setAttribute("transform",
+        `translate(${(m.at.x + deltaX - m.item.x) * k} ${-(m.at.y + deltaY - m.item.y) * k})`));
+      $("hover-info").textContent = members.length > 1
+        ? `${members.length} selected · ${x.toFixed(1)}, ${y.toFixed(1)} mm`
+        : `${item.design} · ${x.toFixed(1)}, ${y.toFixed(1)} mm`;
     };
 
     const done = (up) => {
@@ -1385,35 +1908,19 @@ function movable(group, view, item, k) {
       group.classList.remove("held");
       svg.classList.remove("dragging");
       try { group.releasePointerCapture(up.pointerId); } catch (err) { /* gone */ }
-      if (!moved) return;
+      if (!moved) {
+        // A click chooses. Plain: this one alone. With a modifier: toggled.
+        if (additive && wasChosen) select([item.design], "toggle");
+        else if (!additive) select([item.design], "only");
+        return;
+      }
       state.focus = item.design;
-      pinTo(view, item.design, atX, atY);
+      members.forEach((m) => pinTo(view, m.item.design, m.at.x + deltaX,
+                                   m.at.y + deltaY, m.at.rotation));
       analyze();
     };
     group.onpointerup = done;
     group.onpointercancel = done;
-  };
-
-  group.onkeydown = (event) => {
-    const step = (event.shiftKey ? 10 : 1) * SNAP[view];
-    let { x, y } = nowAt(view, item);
-    if (event.key === "ArrowLeft") x -= step;
-    else if (event.key === "ArrowRight") x += step;
-    else if (event.key === "ArrowUp") y += step;
-    else if (event.key === "ArrowDown") y -= step;
-    else if (event.key === "Delete" || event.key === "Backspace") {
-      event.preventDefault();
-      state.focus = item.design;
-      release(view, item.design);
-      analyze();
-      return;
-    } else return;
-    event.preventDefault();
-    state.focus = item.design;
-    pinTo(view, item.design, x, y);
-    say(x, y);
-    // Held-down arrows coalesce into one request rather than one each.
-    schedule();
   };
 }
 
@@ -1447,23 +1954,78 @@ function canvasFor(minX, minY, maxX, maxY) {
     return node;
   };
 
-  return {
+  blocks.clear();
+  canvas = {
     svg, add, k, W, H,
     sx: (x) => offX + (x - minX) * k,
     sy: (y) => offY + (maxY - y) * k,   // millimetres are y-up, screens are not
+    wx: (px) => minX + (px - offX) / k,  // and back, for a box drawn in pixels
+    wy: (py) => maxY - (py - offY) / k,
   };
+  return canvas;
+}
+
+/** What the block holds: the board's own outline and a dot per part.
+
+    The server sends every point already placed, so this only converts to
+    pixels.  An outline wire may be an arc: EAGLE gives the angle it spans,
+    positive for counter-clockwise, and the screen counts y the other way, so
+    the sweep flips.  Dots are the parts (or, on the sheet, the symbols), named
+    on hover, so a connector can be found before the board is moved. */
+function drawFace(c, group, item) {
+  const px = (p) => `${c.sx(p.x)} ${c.sy(p.y)}`;
+  const path = [];
+  (item.outline || []).forEach((s) => {
+    if (s.t === "w") {
+      if (s.curve) {
+        const chord = Math.hypot(s.x2 - s.x1, s.y2 - s.y1) * c.k;
+        const half = Math.abs(s.curve) * Math.PI / 360;
+        const r = Math.sin(half) ? chord / (2 * Math.sin(half)) : 0;
+        const large = Math.abs(s.curve) > 180 ? 1 : 0;
+        const sweep = s.curve > 0 ? 1 : 0;
+        path.push(`M ${px({ x: s.x1, y: s.y1 })} A ${r} ${r} 0 ${large} ${sweep} ` +
+                  `${px({ x: s.x2, y: s.y2 })}`);
+      } else {
+        path.push(`M ${px({ x: s.x1, y: s.y1 })} L ${px({ x: s.x2, y: s.y2 })}`);
+      }
+    } else if (s.t === "c") {
+      const r = s.r * c.k;
+      path.push(`M ${c.sx(s.x) - r} ${c.sy(s.y)} a ${r} ${r} 0 1 0 ${2 * r} 0 ` +
+                `a ${r} ${r} 0 1 0 ${-2 * r} 0`);
+    } else if (s.t === "p" && s.points.length) {
+      path.push(`M ${px(s.points[0])} ` + s.points.slice(1).map((p) => `L ${px(p)}`).join(" ") + " Z");
+    }
+  });
+  if (path.length) c.add("path", { d: path.join(" ") }, "board-outline", group);
+
+  const dots = item.parts || item.symbols || [];
+  if (!dots.length || c.k < 0.6) return;   // too small to mean anything
+  const r = Math.max(1, Math.min(2.2, c.k * 0.5));
+  dots.forEach((p) => {
+    const dot = c.add("circle", { cx: c.sx(p.x), cy: c.sy(p.y), r }, "part-dot", group);
+    dot.onmouseenter = () => {
+      $("hover-info").textContent = `${item.design} · ${p.name}`;
+    };
+  });
 }
 
 /** One design drawn as a component body, labelled if the words fit. */
 function drawBlock(c, view, item, movableHere) {
   const group = c.add("g", {}, "block");
+  group.dataset.design = item.design;
+  blocks.set(item.design, { group, item, movable: movableHere });
   const pinned = !!pinOf(view, item.design);
   if (pinned) group.classList.add("pinned");
   if (!movableHere) group.classList.add("fixed");
+  if (movableHere && state.selected.has(item.design)) {
+    group.classList.add("selected");
+    group.setAttribute("aria-pressed", "true");
+  }
+  const turn = view === "board" ? (item.rotation || 0) : 0;
 
   const title = c.add("title", {}, null, group);
   title.textContent = `${item.design} · ${item.width.toFixed(1)} × ` +
-    `${item.height.toFixed(1)} mm`;
+    `${item.height.toFixed(1)} mm` + (turn ? ` · turned ${turn}°` : "");
 
   const rect = c.add("rect", {
     x: c.sx(item.x), y: c.sy(item.y + item.height),
@@ -1479,6 +2041,8 @@ function drawBlock(c, view, item, movableHere) {
     rect.classList.remove("hot");
     $("hover-info").textContent = "";
   };
+
+  drawFace(c, group, item);
 
   // Only label a block that has room for the words.  Drawing them regardless
   // turns a crowded arrangement into a pile of overlapping text.
@@ -1498,12 +2062,31 @@ function drawBlock(c, view, item, movableHere) {
     const size = c.add("text",
       { x: c.sx(item.x) + 6, y: c.sy(item.y + item.height) + 28 },
       "board-size", group);
-    size.textContent = `${item.width.toFixed(1)} × ${item.height.toFixed(1)}`;
+    size.textContent = `${item.width.toFixed(1)} × ${item.height.toFixed(1)}`
+      + (turn ? ` · ${turn}°` : "");
   }
   if (pinned && boxW > 14 && boxH > 14) {
     c.add("circle", {
       cx: c.sx(item.x) + boxW - 6, cy: c.sy(item.y + item.height) + 6, r: 2.6,
     }, "pin-mark", group);
+  }
+
+  const x0 = c.sx(item.x), x1 = x0 + boxW;
+  const y0 = c.sy(item.y + item.height), y1 = y0 + boxH;
+  if (turn && boxW > 14 && boxH > 14) {
+    // A turned board reads the same as an upright one of the other shape,
+    // so mark the corner it was drawn from: the one it turned about.
+    const corner = { 90: [x1, y1, -1, -1], 180: [x1, y0, -1, 1],
+                     270: [x0, y0, 1, 1] }[turn] || [x0, y1, 1, -1];
+    const [cx, cy, sx, sy] = corner;
+    c.add("polygon", {
+      points: `${cx},${cy} ${cx + 7 * sx},${cy} ${cx},${cy + 7 * sy}`,
+    }, "corner-mark", group);
+  }
+  if (movableHere) {
+    [[x0, y0], [x1, y0], [x0, y1], [x1, y1]].forEach(([hx, hy]) => {
+      c.add("rect", { x: hx - 3, y: hy - 3, width: 6, height: 6 }, "handle", group);
+    });
   }
 
   if (movableHere) movable(group, view, item, c.k);
@@ -1609,6 +2192,8 @@ function blankStage(lines) {
   const svg = $("canvas");
   const wrap = $("canvas-wrap");
   svg.innerHTML = "";
+  blocks.clear();
+  canvas = null;
   svg.style.display = "block";
   $("placeholder").style.display = "none";
   const W = wrap.clientWidth || 800;
@@ -1634,7 +2219,9 @@ function count(n, noun) {
 function hint(view) {
   const pinned = pinnedIn(view);
   if (pinned) return ` · ${pinned} placed by hand`;
-  return " · drag a block, or use the arrow keys";
+  return view === "board"
+    ? " · drag or arrow keys to move, R to turn, box-drag to choose several"
+    : " · drag or arrow keys to move, box-drag to choose several";
 }
 
 function setStats(first, second, third) {
@@ -1653,6 +2240,8 @@ function drawStage() {
   if (!state.data) return;
   if (state.view === "sheet") drawSheet(); else drawBoard();
   $("auto").disabled = pinnedIn(state.view) === 0;
+  $("rotate").style.display = state.view === "board" ? "" : "none";
+  paintSelection();
   [...$("views").children].forEach((b) => {
     b.classList.toggle("on", b.dataset.view === state.view);
   });
@@ -1661,6 +2250,7 @@ function drawStage() {
 function setView(view) {
   if (state.view === view) return;
   state.view = view;
+  state.selected.clear();           // a selection belongs to one view
   $("hover-info").textContent = "";
   drawStage();
 }
@@ -1702,6 +2292,17 @@ async function runMerge() {
     if (out.sch) host.append(el("div", "path", out.sch));
     if (out.brd) host.append(el("div", "path", out.brd));
     if (out.plan) host.append(el("div", "path", out.plan));
+
+    // The same check the command line runs, on what was just written.
+    if (out.check) {
+      const fine = out.check.consistent;
+      host.append(el("div", "verdict " + (fine ? "ok" : "bad"), fine
+        ? "Checked: consistent. Every part, net and library reference resolves."
+        : `Checked: ${count(out.check.problems.length, "problem")}`));
+      out.check.problems.slice(0, 6).forEach((p) => host.append(el("div", "warn", p)));
+      out.check.notes.forEach((n) => host.append(el("div", "sub", n)));
+    }
+
     const kv = el("div", "kv");
     const add = (k, v) => { kv.append(el("span", null, k), el("span", null, String(v))); };
     add("parts", out.parts);
@@ -1711,6 +2312,22 @@ async function runMerge() {
     if (out.dropped) add("left out", out.dropped);
     host.append(kv);
     out.warnings.slice(0, 6).forEach((w) => host.append(el("div", "warn", w)));
+
+    if (out.outDir) {
+      const open = el("button", "small", "Open folder");
+      open.title = out.outDir;
+      open.onclick = () => post("/api/reveal", { path: out.outDir })
+        .catch((err) => showError(err.message));
+      host.append(open);
+    }
+    const next = el("div", "next");
+    next.append(el("b", null, "Next. "));
+    next.append(document.createTextNode(
+      "Open the board in EAGLE and run DRC; the airwires are the joined nets "
+      + "waiting to be routed. Using KiCad? File › Import › Non-KiCad Project "
+      + "opens this pair as it is."));
+    host.append(next);
+
     $("t-out").textContent = "written";
     $("t-out").className = "tally act";
     showError("");
@@ -1808,6 +2425,22 @@ $("path").onkeydown = (e) => { if (e.key === "Enter") scan(); };
 $("merge").onclick = runMerge;
 ["o-outline", "o-gap", "o-layout", "o-optimize"]
   .forEach((id) => { $(id).oninput = schedule; $(id).onchange = schedule; });
+$("o-outdir").oninput = outdirNote;
+$("undo").onclick = undo;
+$("browse-plan").onclick = () => openPlan("");
+$("open-plan").onclick = () => {
+  const path = $("plan-path").value.trim();
+  if (path) openPlan(path); else openPlan("");
+};
+$("plan-path").onkeydown = (e) => { if (e.key === "Enter") $("open-plan").onclick(); };
+document.addEventListener("keydown", (event) => {
+  // Ctrl+Z anywhere but in a field, where the field's own undo is wanted.
+  if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "z") return;
+  const tag = (event.target.tagName || "").toLowerCase();
+  if (tag === "input" || tag === "textarea" || tag === "select") return;
+  event.preventDefault();
+  undo();
+});
 window.addEventListener("resize", () => {
   setPanelWidth(wantedPanel, false);
   if (state.data) drawStage();
@@ -1816,6 +2449,9 @@ window.addEventListener("resize", () => {
   button.onclick = () => setView(button.dataset.view);
 });
 $("auto").onclick = autoPlace;
+$("rotate").onclick = rotateSelection;
+$("canvas").onpointerdown = startMarquee;
+$("canvas-wrap").onkeydown = canvasKeys;
 $("grip").onpointerdown = startResize;
 $("grip").onkeydown = resizeByKey;
 $("grip").ondblclick = () => setPanelWidth(PANEL.start, true);
@@ -1827,6 +2463,7 @@ fetch("/api/health").then((r) => r.json()).then((d) => {
     // No dialog on this machine; pasting a path is the only way in.
     $("browse").style.display = "none";
     $("browse-big").style.display = "none";
+    $("browse-plan").style.display = "none";
     $("path").placeholder = "paste a path to a folder of .sch files";
   }
   if (d.vendors) {
@@ -1835,7 +2472,9 @@ fetch("/api/health").then((r) => r.json()).then((d) => {
     renderVendors();
     renderToken(d);
   }
-  if (d.start) { $("path").value = d.start; scan(); }
+  outdirNote();
+  if (d.plan) openPlan(d.plan);
+  else if (d.start) { $("path").value = d.start; scan(); }
 });
 </script>
 </body>

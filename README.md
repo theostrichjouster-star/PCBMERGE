@@ -31,17 +31,23 @@ paste a path. Every design in it is listed, and you set how many copies of each
 you want.
 
 **Watch the picture.** The canvas draws the merge as it would be built. Board
-view shows the source boards packed inside the outline, with a line for every net
-that still needs routing. Schematic view shows the shared sheet. Change anything
-on the left and both redraw.
+view shows the source boards packed inside the outline, each drawn with its own
+outline and a dot for every part, with a line for every net that still needs
+routing. Schematic view shows the shared sheet. Change anything on the left and
+both redraw.
 
 **Move things yourself.** Drag a block, or focus it and use the arrow keys, and
-the packer fills in around whatever you have placed. Delete hands one back to it;
-Auto-place hands back everything in that view.
+the packer fills in around whatever you have placed. Press R to turn a board a
+quarter; the packer tries that too. Click with Ctrl held, or drag a box on empty
+canvas, to choose several and move or turn them together. Delete hands the chosen
+blocks back to the packer; Auto-place hands back everything in that view. Ctrl+Z
+undoes.
 
 **Answer the net questions.** What joined automatically is listed, what needs a
-decision has a join or split toggle, and pairs that look like the same wire under
-different names are offered as suggestions.
+decision has a join or split toggle, with why it is asked and what each design's
+copy of the net is wired to under it. Hover one to see where it sits on each
+board. Pairs that look like the same wire under different names are offered as
+suggestions.
 
 **Leave parts out.** Mounting holes, fiducials and silkscreen labels are grouped
 by kind, with the ones nothing is wired to marked, so a crowded merge can be
@@ -56,8 +62,15 @@ an hour and no file search, which is where most KiCad hardware is found. It need
 no permissions for public designs, is checked before it is saved, and every later
 run picks it up.
 
-**Then press Merge.** You get a `.sch` and a `.brd`. Open the board in EAGLE and
-run DRC; the airwires are the joined nets waiting to be routed.
+**Then press Merge.** You get a `.sch` and a `.brd` in an `out` folder beside
+your designs, checked for consistency as they are written, and a plan holding
+every decision. Open the board in EAGLE and run DRC; the airwires are the joined
+nets waiting to be routed. In KiCad, File › Import › Non-KiCad Project opens the
+pair as it is.
+
+**Come back later.** The page remembers where you were in each folder and offers
+to carry on. A saved plan reopens from the Write files section, or with
+`pcbmerge web --plan out/merged-plan.json`.
 
 Everything the page does is also on the command line. Run `pcbmerge --help`.
 
@@ -95,10 +108,11 @@ first.
 
 ## What it will not do
 
-- Writes EAGLE only. Altium is not supported.
+- Writes EAGLE only. KiCad imports the result directly; Altium is not
+  supported.
 - Never re-routes copper. Joined nets are left as airwires on purpose.
-- Places designs as whole blocks. Moving one part within a design is a job for
-  EAGLE, on the merged file.
+- Places designs as whole blocks, turned only by quarters. Moving one part
+  within a design is a job for EAGLE, on the merged file.
 - Takes design rules and global attributes from the first design. Conflicts
   elsewhere are reported, not merged.
 

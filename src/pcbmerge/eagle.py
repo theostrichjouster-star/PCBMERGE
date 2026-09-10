@@ -180,6 +180,129 @@ def translate(elem: ET.Element, dx: float, dy: float) -> None:
                     continue
 
 
+def rotate(elem: ET.Element, degrees: float, cx: float = 0.0, cy: float = 0.0) -> None:
+    """Turn a subtree a multiple of a quarter turn about (cx, cy), counter-clockwise.
+
+    Every coordinate pair moves, and every `rot` attribute is composed with the
+    turn so a footprint or a label faces the way it did relative to the board.
+    A wire's `curve` and a polygon vertex's `curve` are angles relative to the
+    wire itself, so a proper rotation leaves them alone.  A rectangle is the
+    one shape not described by its points alone: it is two corners turned about
+    their own centre, so it keeps its corner size, moves its centre, and turns.
+
+    Same rule as `translate`: board-level geometry only.  Library packages
+    have local coordinates and must stay untouched.
+    """
+    turns = quarter_turns(degrees)
+    if turns == 0:
+        return
+    for node in elem.iter():
+        if not isinstance(node.tag, str):
+            continue
+        if node.tag == "rect":
+            _rotate_rect(node, turns, cx, cy)
+            continue
+        for xa, ya in POINT_ATTRS:
+            xv, yv = node.get(xa), node.get(ya)
+            if xv is not None and yv is not None:
+                try:
+                    x, y = _turn(float(xv), float(yv), turns, cx, cy)
+                except ValueError:
+                    continue
+                node.set(xa, fmt(x))
+                node.set(ya, fmt(y))
+        if node.tag == "frame":
+            # A frame is two corners and a grid of rows and columns; EAGLE
+            # wants the first corner to be the lower-left one.
+            _normalise_corners(node)
+        rot = node.get("rot")
+        if rot is None and node.tag in ORIENTED:
+            # EAGLE reads a missing rot as R0, and R0 turned is not R0.
+            rot = "R0"
+        if rot is not None:
+            node.set("rot", compose_rot(rot, turns * 90))
+
+
+# Tags that face a direction, so a missing `rot` on them means R0.
+ORIENTED = {"element", "attribute", "text", "label", "instance", "pad", "smd", "pin"}
+
+
+def quarter_turns(degrees: float) -> int:
+    """How many quarter turns a rotation is, refusing anything in between.
+
+    Only right angles keep a board's footprints on the grid it was drawn on
+    and its rectangles axis-aligned, so nothing else is offered.
+    """
+    turns = degrees / 90.0
+    if abs(turns - round(turns)) > 1e-9:
+        raise ValueError(f"a board can only turn by multiples of 90 degrees, not {degrees}")
+    return int(round(turns)) % 4
+
+
+def _turn(x: float, y: float, turns: int, cx: float, cy: float) -> tuple[float, float]:
+    dx, dy = x - cx, y - cy
+    if turns == 1:
+        dx, dy = -dy, dx
+    elif turns == 2:
+        dx, dy = -dx, -dy
+    elif turns == 3:
+        dx, dy = dy, -dx
+    return cx + dx, cy + dy
+
+
+def _rotate_rect(node: ET.Element, turns: int, cx: float, cy: float) -> None:
+    try:
+        x1, y1 = float(node.get("x1", "0")), float(node.get("y1", "0"))
+        x2, y2 = float(node.get("x2", "0")), float(node.get("y2", "0"))
+    except ValueError:
+        return
+    half_w, half_h = abs(x2 - x1) / 2, abs(y2 - y1) / 2
+    mid_x, mid_y = _turn((x1 + x2) / 2, (y1 + y2) / 2, turns, cx, cy)
+    node.set("x1", fmt(mid_x - half_w))
+    node.set("y1", fmt(mid_y - half_h))
+    node.set("x2", fmt(mid_x + half_w))
+    node.set("y2", fmt(mid_y + half_h))
+    node.set("rot", compose_rot(node.get("rot", "R0"), turns * 90))
+
+
+def _normalise_corners(node: ET.Element) -> None:
+    try:
+        x1, y1 = float(node.get("x1", "0")), float(node.get("y1", "0"))
+        x2, y2 = float(node.get("x2", "0")), float(node.get("y2", "0"))
+    except ValueError:
+        return
+    node.set("x1", fmt(min(x1, x2)))
+    node.set("y1", fmt(min(y1, y2)))
+    node.set("x2", fmt(max(x1, x2)))
+    node.set("y2", fmt(max(y1, y2)))
+
+
+_ROT = re.compile(r"^(S?)(M?)R(-?[0-9]+(?:\.[0-9]+)?)$")
+
+
+def parse_rot(text: str) -> tuple[str, float]:
+    """Split EAGLE's `[S][M]R<angle>` into its flags and its angle."""
+    match = _ROT.match(text.strip() or "R0")
+    if match is None:
+        raise ValueError(f"not an EAGLE rotation: {text!r}")
+    spin, mirror, angle = match.groups()
+    return spin + mirror, float(angle)
+
+
+def compose_rot(text: str, degrees: float) -> str:
+    """Turn an existing `rot` further by `degrees`, keeping its flags.
+
+    EAGLE applies a mirror before the angle, so turning the whole drawing
+    afterwards adds to the angle and leaves the mirror as it was: `MR90`
+    turned a quarter is `MR180`.
+    """
+    try:
+        flags, angle = parse_rot(text)
+    except ValueError:
+        return text
+    return f"{flags}R{fmt((angle + degrees) % 360)}"
+
+
 def fmt(value: float) -> str:
     """Format a coordinate the way EAGLE does: shortest exact decimal."""
     text = f"{value:.6f}".rstrip("0").rstrip(".")

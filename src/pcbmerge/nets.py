@@ -58,6 +58,25 @@ AUTO_JOIN = {Kind.GROUND, Kind.RAIL}
 AUTO_SPLIT = {Kind.ANONYMOUS}
 NEEDS_DECISION = {Kind.AMBIGUOUS, Kind.SIGNAL}
 
+# Why each kind is treated as it is, in one sentence someone deciding can
+# read.  A question with no reason attached is a guess with a toggle.
+REASONS = {
+    Kind.GROUND: "Ground. The name states the node, so every copy is the same wire.",
+    Kind.RAIL: "The voltage is in the name, so every copy is the same wire.",
+    Kind.AMBIGUOUS: "Named after a role, not a voltage. VCC can be 5 V on one "
+                    "board and 3.3 V on the next; join only if you know they match.",
+    Kind.SIGNAL: "The same signal name on more than one design. Join if they "
+                 "are meant to be one wire, split if the name is a coincidence.",
+    Kind.REPLICA: "The same name in several copies of one design. Split gives "
+                  "each copy its own; join makes it common to all of them.",
+    Kind.ANONYMOUS: "An auto-generated name, which says nothing, so never joined.",
+    Kind.UNIQUE: "Used by one design only, so nothing to decide.",
+}
+
+
+def explain(kind: Kind) -> str:
+    return REASONS.get(kind, "")
+
 
 def normalize(name: str) -> str:
     """Canonical key for a net name, so 3.3V, +3V3 and 3V3 land together."""

@@ -21,8 +21,8 @@ from pathlib import Path
 
 from . import kicad, layout, pruning
 from .eagle import (
-    EagleDoc, EagleError, bbox, clone, content_hash, fmt, strip_urns, tidy,
-    translate, unique_name,
+    EagleDoc, EagleError, bbox, clone, content_hash, fmt, rotate, strip_urns,
+    tidy, translate, unique_name,
 )
 from .libraries import LibraryMerger, apply_to_element, apply_to_part
 from .nets import Action, NetResolver, plan_design_names
@@ -45,6 +45,12 @@ UNWIELDY_SHEET = 1500.0
 # Margin between a fixed board outline and the sub-boards placed inside it.
 OUTLINE_MARGIN = 2.0
 OUTLINE_WIDTH = "0"
+
+# How much of a board the preview describes.  Enough to draw any outline
+# someone would recognise and to dot every part on a dense board, and a cap
+# so a pathological file does not turn every click into a megabyte.
+PREVIEW_SHAPES = 400
+PREVIEW_PARTS = 600
 
 
 @dataclass
@@ -429,7 +435,9 @@ class Merger:
         sizes = self._sheet_sizes()
         tiles = layout.sheet_tiles(sizes)
         known = {d.name for d in self.designs}
-        tiles.update({name: spot for name, spot in self.plan.spots("sheet").items()
+        # A drawing never turns, so only the corner of a sheet spot is used.
+        tiles.update({name: (spot[0], spot[1])
+                      for name, spot in self.plan.spots("sheet").items()
                       if name in known})
         return tiles
 
@@ -548,9 +556,86 @@ class Merger:
         for design, (_, width, height) in zip(self.designs, sizes):
             box = self._sheet_extent(design)
             x, y = tiles.get(design.name, (box[0], box[1]))
+            symbols, more = self._symbol_spots(design, (x - box[0], y - box[1]))
             out.append({"design": design.name, "x": x, "y": y,
-                        "width": width, "height": height})
+                        "width": width, "height": height,
+                        "symbols": symbols, "more": more})
         return out
+
+    def _symbol_spots(self, design: Design,
+                      offset: tuple[float, float]) -> tuple[list[dict], bool]:
+        """Where each symbol sits on the shared sheet, so a block has a face.
+
+        The same offset the sheet build applies, so a dot in the preview is
+        where the symbol will be drawn.  Page borders are left out, as they
+        are from the sheet itself.
+        """
+        frames = self._frame_parts(design)
+        out: list[dict] = []
+        for sheet in design.sch.sheets():
+            for instance in sheet.iterfind("instances/instance"):
+                part = instance.get("part", "")
+                if part in frames or part in design.dropped_parts:
+                    continue
+                try:
+                    x = float(instance.get("x", "0")) + offset[0]
+                    y = float(instance.get("y", "0")) + offset[1]
+                except ValueError:
+                    continue
+                out.append({"name": part, "x": x, "y": y})
+        return out[:PREVIEW_PARTS], len(out) > PREVIEW_PARTS
+
+    def _outline_shapes(self, design: Design, place: layout.Placement) -> list[dict]:
+        """The board's own outline, where its placement puts it.
+
+        Wires, with their arcs, circles and polygons on the Dimension layer,
+        each point put through the placement the way the copper will be.  The
+        preview draws these inside the block so a board is recognisable by
+        its shape and not only by its name.
+        """
+        plain = design.brd.section.find("plain") if design.brd is not None else None
+        out: list[dict] = []
+        if plain is None:
+            return out
+        for node in plain:
+            if not isinstance(node.tag, str) or node.get("layer") != layout.DIMENSION_LAYER:
+                continue
+            try:
+                if node.tag == "wire":
+                    x1, y1 = place.transform(float(node.get("x1")), float(node.get("y1")))
+                    x2, y2 = place.transform(float(node.get("x2")), float(node.get("y2")))
+                    shape = {"t": "w", "x1": x1, "y1": y1, "x2": x2, "y2": y2}
+                    if node.get("curve"):
+                        shape["curve"] = float(node.get("curve"))
+                    out.append(shape)
+                elif node.tag == "circle":
+                    x, y = place.transform(float(node.get("x")), float(node.get("y")))
+                    out.append({"t": "c", "x": x, "y": y, "r": float(node.get("radius"))})
+                elif node.tag == "polygon":
+                    points = [place.transform(float(v.get("x")), float(v.get("y")))
+                              for v in node.iterfind("vertex")]
+                    if len(points) > 2:
+                        out.append({"t": "p", "points": [{"x": x, "y": y} for x, y in points]})
+            except (TypeError, ValueError):
+                continue
+            if len(out) >= PREVIEW_SHAPES:
+                break
+        return out
+
+    def _part_spots(self, design: Design,
+                    place: layout.Placement) -> tuple[list[dict], bool]:
+        """Where each footprint's origin lands, by the part's own name."""
+        out: list[dict] = []
+        for element in design.brd.elements():
+            name = element.get("name", "")
+            if name in design.dropped_parts:
+                continue
+            try:
+                x, y = place.transform(float(element.get("x", "0")), float(element.get("y", "0")))
+            except ValueError:
+                continue
+            out.append({"name": name, "x": x, "y": y})
+        return out[:PREVIEW_PARTS], len(out) > PREVIEW_PARTS
 
     def preview(self) -> dict:
         """Where the boards would land, and what would still need routing.
@@ -569,19 +654,48 @@ class Merger:
         offsets = {p.design: p for p in placements}
 
         points: dict[str, list[dict]] = {}
+        centroids: dict[str, dict[str, tuple[float, float]]] = {}
         for design in boards:
             place = offsets[design.name]
+            centroids[design.name] = {}
             for net, (x, y) in self._net_centroids(design).items():
+                x, y = place.transform(x, y)
+                centroids[design.name][net] = (x, y)
                 points.setdefault(net, []).append(
-                    {"design": design.name, "x": x + place.dx, "y": y + place.dy})
+                    {"design": design.name, "x": x, "y": y})
 
         airwires = [{"net": net, "points": spots}
                     for net, spots in points.items() if len(spots) > 1]
         airwires.sort(key=lambda a: -len(a["points"]))
+
+        # Where each undecided net sits on every board it touches.  A split
+        # net has no airwire to point at, so this is what lets someone see
+        # what a join would connect before choosing it.
+        by_name = {d.name: d for d in boards}
+        marks: dict[str, list[dict]] = {}
+        for group in self.resolver.open_questions() + self.resolver.replica_questions():
+            for ref in group.refs:
+                design = by_name.get(ref.design)
+                if design is None:
+                    continue
+                final = design.net_map.get(ref.raw, ref.raw)
+                spot = centroids[design.name].get(final)
+                if spot is not None:
+                    marks.setdefault(group.key, []).append(
+                        {"design": design.name, "x": spot[0], "y": spot[1]})
+
+        faces: dict[str, dict] = {}
+        for design in boards:
+            place = offsets[design.name]
+            parts, more = self._part_spots(design, place)
+            faces[design.name] = {"outline": self._outline_shapes(design, place),
+                                  "parts": parts, "more": more}
         return {
             "outline": self.report.outline,
             "placements": placements,
+            "faces": faces,
             "airwires": airwires,
+            "marks": marks,
             "sheet": self.sheet_preview(),
         }
 
@@ -620,7 +734,7 @@ class Merger:
                 continue
             copy = clone(source)
             place = by_design[design.name]
-            translate(copy, place.dx, place.dy)
+            _move(copy, place)
             for node in list(copy):
                 if not keep_outlines and _is_outline(node):
                     # The merged board gets one outline of its own; carrying
@@ -657,7 +771,7 @@ class Merger:
                 node = clone(element)
                 node.set("name", design.part_map.get(original, original))
                 apply_to_element(node, renames)
-                translate(node, place.dx, place.dy)
+                _move(node, place)
                 elements.append(node)
                 self.report.elements += 1
 
@@ -672,7 +786,7 @@ class Merger:
                 if cls is not None:
                     copy.set("class", design.class_map.get(cls, "0"))
                 _rewrite_signal_body(copy, design)
-                translate(copy, place.dx, place.dy)
+                _move(copy, place)
 
                 if final in merged_signals:
                     # A joined net: fold this design's copper into the existing
@@ -842,6 +956,17 @@ class Merger:
         for cls in self._classes:
             node.append(clone(cls))
         return node
+
+
+def _move(node: ET.Element, place: layout.Placement) -> None:
+    """Put a piece of board geometry where its placement says.
+
+    The turn comes first, about the corner the board was drawn with, and the
+    shift after; `Placement.transform` does the same to a single point, so a
+    centroid and the copper it stands for always land together.
+    """
+    rotate(node, place.rotation, place.pivot_x, place.pivot_y)
+    translate(node, place.dx, place.dy)
 
 
 def _is_outline(node: ET.Element) -> bool:

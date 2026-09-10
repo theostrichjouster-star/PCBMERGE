@@ -8,7 +8,8 @@ named nets were tied together by hand.  Edit it, commit it, feed it back.
 Plans written before version 4 may name a sheet layout.  That option is gone and
 is ignored on load; everything goes on one sheet now.  Version 5 adds hand
 placements; a plan without them simply lets the packer decide everything, which
-is what every earlier plan did.
+is what every earlier plan did.  Version 6 adds a rotation to each placement; a
+placement without one is upright, which is the only way a board could be before.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ from .eagle import sanitize_name
 from .layout import DEFAULT_OUTLINE
 from .nets import Action, Kind, NetResolver
 
-PLAN_VERSION = 5
+PLAN_VERSION = 6
 
 
 @dataclass
@@ -109,13 +110,16 @@ class Spot:
     Positions are the bottom-left corner in millimetres, in the merged
     drawing's own coordinates, which is what both the board and the sheet are
     already measured in.  `view` says which of the two it applies to: a design
-    can be pinned on the board and still packed on the sheet.
+    can be pinned on the board and still packed on the sheet.  `rotation` is
+    degrees counter-clockwise in quarter turns, and only means anything on the
+    board: a drawing turned on its side is not a drawing anyone can read.
     """
 
     design: str
     view: str = "board"      # "board" or "sheet"
     x: float = 0.0
     y: float = 0.0
+    rotation: int = 0        # 0, 90, 180 or 270
 
 
 @dataclass
@@ -155,7 +159,7 @@ class MergePlan:
             outline=data.get("outline", DEFAULT_OUTLINE),
             gap=float(data.get("gap", 5.0)),
             columns=int(data.get("columns", 0)),
-            positions=[Spot(**s) for s in data.get("positions", [])],
+            positions=[_spot(s) for s in data.get("positions", [])],
             version=int(data.get("version", PLAN_VERSION)),
         )
 
@@ -170,9 +174,9 @@ class MergePlan:
         return cls.from_json(Path(path).read_text(encoding="utf-8"))
 
     # -- lookup -------------------------------------------------------------
-    def spots(self, view: str) -> dict[str, tuple[float, float]]:
-        """Hand placements for one view, as design -> (x, y)."""
-        return {s.design: (float(s.x), float(s.y))
+    def spots(self, view: str) -> dict[str, tuple[float, float, int]]:
+        """Hand placements for one view, as design -> (x, y, rotation)."""
+        return {s.design: (float(s.x), float(s.y), int(s.rotation))
                 for s in self.positions if s.view == view}
 
     def decision_for(self, key: str) -> NetDecision | None:
@@ -184,6 +188,17 @@ class MergePlan:
     @property
     def instances(self) -> list[InstanceSpec]:
         return expand(self.designs)
+
+
+def _spot(data: dict) -> Spot:
+    """A placement as read from a plan, whichever version wrote it."""
+    return Spot(
+        design=str(data.get("design", "")),
+        view=str(data.get("view", "board")),
+        x=float(data.get("x", 0.0)),
+        y=float(data.get("y", 0.0)),
+        rotation=int(round(float(data.get("rotation", 0)) / 90.0)) * 90 % 360,
+    )
 
 
 def expand(specs: list[DesignSpec]) -> list[InstanceSpec]:

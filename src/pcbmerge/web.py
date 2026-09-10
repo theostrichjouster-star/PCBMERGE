@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import textwrap
@@ -28,7 +29,7 @@ from urllib.parse import urlparse
 from . import kicad, linking, pruning, sources
 from .eagle import EagleDoc, EagleError, design_stem
 from .merge import Merger, build_resolver, load_designs, merge
-from .nets import Action, Kind
+from .nets import Action, Kind, explain
 from .plan import (
     DesignSpec, MergePlan, Spot, apply_plan, default_prefix, design_name, expand,
 )
@@ -36,8 +37,10 @@ from .plan import (
 HOST = "127.0.0.1"
 STATIC = Path(__file__).parent / "static"
 
-# A folder to open on load, so `pcbmerge web somewhere` lands ready to use.
+# A folder to open on load, so `pcbmerge web somewhere` lands ready to use,
+# and a plan to open instead, so `pcbmerge web --plan x.json` lands mid-merge.
 START: str = ""
+PLAN_START: str = ""
 
 # Parsed documents survive between requests: re-reading several megabytes of
 # XML after every click would make the interface feel broken.
@@ -60,6 +63,23 @@ PICKER = textwrap.dedent("""
     sys.stdout.write(chosen or "")
 """)
 PICKER_TIMEOUT = 600
+
+# The same dialog for a plan file, since a plan is a thing someone saved and
+# will want to find by looking rather than by typing.
+FILE_PICKER = textwrap.dedent("""
+    import sys
+    import tkinter as tk
+    from tkinter import filedialog
+
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    chosen = filedialog.askopenfilename(
+        title="Open a merge plan",
+        filetypes=[("merge plan", "*.json"), ("all files", "*")])
+    root.destroy()
+    sys.stdout.write(chosen or "")
+""")
 
 
 def can_browse() -> bool:
@@ -106,7 +126,7 @@ class Handler(BaseHTTPRequestHandler):
             from . import __version__
 
             self._json({"ok": True, "version": __version__, "start": START,
-                        "canBrowse": can_browse(),
+                        "plan": PLAN_START, "canBrowse": can_browse(),
                         "vendors": [{"org": v.org, "label": v.label, "note": v.note}
                                     for v in sources.VENDORS],
                         **_token_state()})
@@ -117,13 +137,16 @@ class Handler(BaseHTTPRequestHandler):
         route = urlparse(self.path).path
         actions = {
             "/api/browse": browse,
+            "/api/browse-plan": browse_plan,
             "/api/scan": scan,
+            "/api/plan": open_plan,
             "/api/token": set_token,
             "/api/search": search,
             "/api/repo": repository,
             "/api/import": import_designs,
             "/api/analyze": analyze,
             "/api/merge": run_merge,
+            "/api/reveal": reveal,
         }
         action = actions.get(route)
         if action is None:
@@ -178,26 +201,143 @@ def scan(body: dict) -> dict:
 
 def browse(body: dict) -> dict:
     """Ask the operating system for a folder, then scan whatever comes back."""
-    if not can_browse():
-        raise ValueError(
-            "no folder dialog on this machine; type or paste the path instead")
-    try:
-        done = subprocess.run(
-            [sys.executable, "-c", PICKER],
-            capture_output=True, text=True, timeout=PICKER_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        return {"cancelled": True}
-    except OSError as exc:
-        raise ValueError(f"could not open a folder dialog: {exc}") from exc
-
-    if done.returncode != 0:
-        detail = (done.stderr or "").strip().splitlines()
-        raise ValueError(detail[-1] if detail else "the folder dialog failed")
-
-    chosen = done.stdout.strip()
+    chosen = _pick(PICKER, "folder")
     if not chosen:
         return {"cancelled": True}
     return scan({"path": chosen})
+
+
+def browse_plan(body: dict) -> dict:
+    """Ask the operating system for a plan file, then open it."""
+    chosen = _pick(FILE_PICKER, "file")
+    if not chosen:
+        return {"cancelled": True}
+    return open_plan({"path": chosen})
+
+
+def _pick(script: str, what: str) -> str:
+    """Run one of the dialogs in its own process and return what was chosen."""
+    if not can_browse():
+        raise ValueError(
+            f"no {what} dialog on this machine; type or paste the path instead")
+    try:
+        done = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True, text=True, timeout=PICKER_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return ""
+    except OSError as exc:
+        raise ValueError(f"could not open a {what} dialog: {exc}") from exc
+
+    if done.returncode != 0:
+        detail = (done.stderr or "").strip().splitlines()
+        raise ValueError(detail[-1] if detail else f"the {what} dialog failed")
+    return done.stdout.strip()
+
+
+# --------------------------------------------------------------------------
+# a saved plan, reopened
+# --------------------------------------------------------------------------
+
+def open_plan(body: dict) -> dict:
+    """Turn a saved plan back into everything the page holds.
+
+    This is the inverse of `_plan` and `_resolve`: the folder the plan's
+    designs live in is scanned, so designs that were not in the plan are
+    listed unticked, and the plan's counts, prefixes, drops, decisions,
+    links, connections, placements and options are laid over the top.  A
+    design the plan names that is no longer in the folder is reported, not
+    fatal: the rest of the plan is still worth having.
+    """
+    raw = (body.get("path") or "").strip().strip('"')
+    if not raw:
+        raise ValueError("give a plan file to open")
+    path = Path(raw).expanduser()
+    if not path.is_file():
+        raise ValueError(f"{path} does not exist")
+    try:
+        plan = MergePlan.load(path)
+    except (ValueError, TypeError, KeyError, AttributeError, UnicodeDecodeError) as exc:
+        raise ValueError(f"{path.name} is not a merge plan: {exc}") from exc
+    if not plan.designs:
+        raise ValueError(f"{path.name} names no designs")
+
+    # A plan's paths are as they were given: absolute if the folder was
+    # chosen with the dialog, relative to where the server or the command
+    # was run if it was typed that way.  Try them as written first, and only
+    # then beside the plan, which is where a plan copied elsewhere with its
+    # designs would have them.
+    def located(text: str) -> Path:
+        candidate = Path(text).expanduser()
+        if candidate.is_absolute() or candidate.exists():
+            return candidate
+        beside = path.parent / candidate
+        return beside if beside.exists() else candidate
+
+    folder = located(plan.designs[0].sch).parent
+    scanned = scan({"path": str(folder)})
+
+    by_sch = {Path(d["sch"]).resolve(): d for d in scanned["designs"]}
+    by_name = {d["name"]: d for d in scanned["designs"]}
+    for design in scanned["designs"]:
+        design["use"] = False
+    missing: list[str] = []
+    for spec in plan.designs:
+        found = by_sch.get(located(spec.sch).resolve()) or by_name.get(spec.name)
+        if found is None:
+            missing.append(spec.name)
+            continue
+        found["use"] = True
+        found["count"] = max(1, int(spec.count or 1))
+        if spec.prefix:
+            found["prefix"] = spec.prefix
+
+    decisions = {
+        net.key: ({"action": net.action, "name": net.name}
+                  if net.action == Action.JOIN.value else {"action": net.action})
+        for net in plan.nets if net.decided_by != "auto"
+    }
+    return {
+        "folder": scanned["folder"],
+        "designs": scanned["designs"],
+        "drops": list(plan.drops),
+        "decisions": decisions,
+        "links": [{"keys": list(link.keys), "name": link.name} for link in plan.links],
+        "connections": [
+            {"members": [{"design": m[0], "net": m[1]}
+                         for m in conn.members if len(m) == 2],
+             "name": conn.name}
+            for conn in plan.connections
+        ],
+        "positions": [asdict(spot) for spot in plan.positions],
+        "options": {"layout": plan.layout, "optimize": plan.optimize,
+                    "outline": plan.outline, "gap": plan.gap},
+        "output": plan.output,
+        "plan": str(path),
+        "missing": missing,
+    }
+
+
+def reveal(body: dict) -> dict:
+    """Open a folder in the operating system's own file manager.
+
+    Only a folder that exists, and only on the machine the server runs on,
+    which is the machine the page is on: the server binds to loopback.
+    """
+    raw = (body.get("path") or "").strip().strip('"')
+    target = Path(raw).expanduser()
+    if not raw or not target.is_dir():
+        raise ValueError(f"{raw or 'nothing'} is not a folder that exists")
+    try:
+        if sys.platform.startswith("win"):
+            os.startfile(str(target))  # noqa: S606 - the point of the call
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(target)])
+        else:
+            subprocess.Popen(["xdg-open", str(target)])
+    except OSError as exc:
+        raise ValueError(f"could not open {target}: {exc}") from exc
+    return {"opened": str(target)}
 
 
 # --------------------------------------------------------------------------
@@ -383,8 +523,12 @@ def _positions(body: dict) -> list[Spot]:
         if view not in ("board", "sheet") or not item.get("design"):
             continue
         try:
+            # Whatever angle the page holds is snapped to a quarter turn: a
+            # board only turns by right angles, and a drawing does not turn.
+            turn = float(item.get("rotation") or 0) if view == "board" else 0.0
             out.append(Spot(design=str(item["design"]), view=view,
-                            x=float(item["x"]), y=float(item["y"])))
+                            x=float(item["x"]), y=float(item["y"]),
+                            rotation=int(round(turn / 90.0)) * 90 % 360))
         except (KeyError, TypeError, ValueError):
             continue
     return out
@@ -449,7 +593,7 @@ def analyze(body: dict) -> dict:
              "designs": len(g.designs), "mechanical": g.mechanical, "note": g.note}
             for g in pruning.catalog(designs)
         ],
-        "nets": _nets(resolver),
+        "nets": _nets(resolver, designs),
         "suggestions": [
             {"left": s.left, "right": s.right, "leftName": s.left_name,
              "rightName": s.right_name, "score": round(s.score, 2),
@@ -470,9 +614,15 @@ def analyze(body: dict) -> dict:
     }
 
 
-def _nets(resolver) -> dict:
-    def entry(group) -> dict:
-        return {
+# How many pins a net question lists per design before saying "and n more".
+PINS_SHOWN = 6
+
+
+def _nets(resolver, designs) -> dict:
+    by_name = {d.name: d for d in designs}
+
+    def entry(group, evidence: bool = False) -> dict:
+        out = {
             "key": group.key,
             "name": group.merged_name or group.display,
             "display": group.display,
@@ -482,26 +632,76 @@ def _nets(resolver) -> dict:
             "sources": group.sources,
             "spellings": group.spellings,
             "decidedBy": group.decided_by,
+            "reason": explain(group.kind),
         }
+        if evidence:
+            # What each design's copy of the net is wired to, which is the
+            # only thing a join-or-split question can be answered from.
+            out["pins"] = {
+                design: _pins(by_name[design], raws)
+                for design, raws in group.occurrences.items() if design in by_name
+            }
+        return out
 
     groups = resolver.all_groups()
     return {
         "joined": [entry(g) for g in resolver.joined()],
-        "questions": [entry(g) for g in resolver.open_questions()],
-        "replicas": [entry(g) for g in resolver.replica_questions()],
+        "questions": [entry(g, True) for g in resolver.open_questions()],
+        "replicas": [entry(g, True) for g in resolver.replica_questions()],
         "anonymous": sum(1 for g in groups if g.kind is Kind.ANONYMOUS),
         "unique": sum(1 for g in groups if g.kind is Kind.UNIQUE),
     }
 
 
+def _pins(design, raws: list[str]) -> dict:
+    """The part pins a design's copies of a net reach, by the design's names."""
+    found = pins_of(design.sch, raws)
+    return {"shown": found[:PINS_SHOWN], "count": len(found)}
+
+
+def pins_of(sch: EagleDoc, raws: list[str]) -> list[str]:
+    """`PART.PIN` for every pin reference on the named nets of a schematic."""
+    wanted = set(raws)
+    out: list[str] = []
+    for net in sch.section.iterfind("sheets/sheet/nets/net"):
+        if net.get("name", "") not in wanted:
+            continue
+        for pinref in net.iterfind(".//pinref"):
+            label = f"{pinref.get('part', '')}.{pinref.get('pin', '')}"
+            if label not in out:
+                out.append(label)
+    return out
+
+
 def _board(preview: dict, merger: Merger) -> dict:
     outline = preview["outline"]
     stats = merger.report.after
+    faces = preview.get("faces") or {}
+
+    def face(name: str) -> dict:
+        """A board's own outline and part positions, rounded for the wire."""
+        found = faces.get(name) or {}
+        shapes = []
+        for shape in found.get("outline") or []:
+            rounded = {k: (round(v, 2) if isinstance(v, float) else v)
+                       for k, v in shape.items() if k != "points"}
+            if "points" in shape:
+                rounded["points"] = [{"x": round(pt["x"], 2), "y": round(pt["y"], 2)}
+                                     for pt in shape["points"]]
+            shapes.append(rounded)
+        return {
+            "outline": shapes,
+            "parts": [{"name": p["name"], "x": round(p["x"], 2), "y": round(p["y"], 2)}
+                      for p in found.get("parts") or []],
+            "more": bool(found.get("more")),
+        }
+
     return {
         "outline": list(outline) if outline else None,
         "placements": [
             {"design": p.design, "x": round(p.x, 3), "y": round(p.y, 3),
-             "width": round(p.width, 3), "height": round(p.height, 3)}
+             "width": round(p.width, 3), "height": round(p.height, 3),
+             "rotation": p.rotation, **face(p.design)}
             for p in preview["placements"]
         ],
         "airwires": [
@@ -510,6 +710,11 @@ def _board(preview: dict, merger: Merger) -> dict:
                         for pt in a["points"]]}
             for a in preview["airwires"][:120]
         ],
+        "marks": {
+            key: [{"design": m["design"], "x": round(m["x"], 2), "y": round(m["y"], 2)}
+                  for m in spots]
+            for key, spots in (preview.get("marks") or {}).items()
+        },
         "stats": {
             "airwire": round(stats.airwire, 1) if stats else 0,
             "width": round(stats.width, 1) if stats else 0,
@@ -531,7 +736,10 @@ def _sheet(preview: dict, merger: Merger) -> dict:
     return {
         "blocks": [
             {"design": b["design"], "x": round(b["x"], 2), "y": round(b["y"], 2),
-             "width": round(b["width"], 2), "height": round(b["height"], 2)}
+             "width": round(b["width"], 2), "height": round(b["height"], 2),
+             "symbols": [{"name": s["name"], "x": round(s["x"], 2), "y": round(s["y"], 2)}
+                         for s in b.get("symbols") or []],
+             "more": bool(b.get("more"))}
             for b in blocks
         ],
         "extent": [round(left, 2), round(bottom, 2),
@@ -540,10 +748,24 @@ def _sheet(preview: dict, merger: Merger) -> dict:
     }
 
 
+def output_folder(body: dict) -> Path:
+    """Where a merge lands: beside the project unless told somewhere else.
+
+    A relative folder is taken from the project being merged, not from
+    wherever the server happened to be started, which is where someone will
+    look for the result.
+    """
+    out_dir = Path((body.get("outDir") or "out").strip().strip('"')).expanduser()
+    folder = (body.get("folder") or "").strip().strip('"')
+    if not out_dir.is_absolute() and folder and Path(folder).is_dir():
+        out_dir = Path(folder) / out_dir
+    return out_dir
+
+
 def run_merge(body: dict) -> dict:
     """Write the files. The only action that touches the disk."""
     specs, plan, designs, resolver, _ = _resolve(body)
-    out_dir = Path((body.get("outDir") or "out").strip()).expanduser()
+    out_dir = output_folder(body)
     stem = Path(plan.output).name or "merged"
 
     report = merge(designs, resolver, plan, out_dir, stem)
@@ -559,10 +781,19 @@ def run_merge(body: dict) -> dict:
         keep.positions = plan.positions
         saved = str(keep.save(out_dir / f"{stem}-plan.json"))
 
+    # The same check the command line offers, run on what was just written,
+    # so the page can say "consistent" rather than leaving it to EAGLE.
+    from .cli import check_pair
+
+    verdict = check_pair(report.sch_path) if report.sch_path else None
+
     return {
         "sch": str(report.sch_path) if report.sch_path else None,
         "brd": str(report.brd_path) if report.brd_path else None,
         "plan": saved,
+        "outDir": str(out_dir.resolve()),
+        "check": {"problems": verdict.problems, "notes": verdict.notes,
+                  "consistent": not verdict.problems} if verdict else None,
         "parts": report.parts,
         "elements": report.elements,
         "sheets": report.sheets,
@@ -582,10 +813,11 @@ def run_merge(body: dict) -> dict:
 # --------------------------------------------------------------------------
 
 def serve(port: int = 8765, open_browser: bool = True, verbose: bool = False,
-          start: str = "") -> None:
+          start: str = "", plan: str = "") -> None:
     """Run the front end until interrupted."""
-    global START
+    global START, PLAN_START
     START = start
+    PLAN_START = plan
     server = ThreadingHTTPServer((HOST, port), Handler)
     server.verbose = verbose
     url = f"http://{HOST}:{port}/"
