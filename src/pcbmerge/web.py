@@ -226,6 +226,7 @@ def _repo_json(repo) -> dict:
         "vendor": repo.vendor, "description": repo.description,
         "stars": repo.stars, "updated": repo.updated,
         "branch": repo.branch, "url": repo.url,
+        "described": repo.described,
         "designs": [_design_json(design) for design in repo.designs],
     }
 

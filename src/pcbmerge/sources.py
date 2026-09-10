@@ -101,6 +101,7 @@ class Repo:
     url: str = ""
     designs: list = field(default_factory=list)
     catalog: bool = False
+    described: bool = True   # False when only a file search has been seen
 
     @property
     def full_name(self) -> str:
@@ -261,7 +262,7 @@ def search(query: str, orgs: list[str] | None = None, limit: int = 12,
         raise SourceError("no vendor selected to search")
 
     query = (query or "").strip()
-    candidates, problems = _candidates(query, wanted, max(limit, budget))
+    candidates, problems = _candidates(query, wanted, max(limit, budget), tool)
     if not candidates and problems:
         raise SourceError(problems[0].split(": ", 1)[-1])
     if not inspect:
@@ -299,7 +300,55 @@ def matches(design: "RemoteDesign", query: str) -> bool:
     return all(word in haystack for word in words) if words else True
 
 
-def _candidates(query: str, wanted: list[str], depth: int) -> tuple[list[Repo], list[str]]:
+# The extension a file search looks for, per tool.  KiCad is the default
+# because that is where searching by repository name falls down: vendors name a
+# repository after a board and put EAGLE files in it, but file KiCad work under
+# a name that answers no part query at all.
+EXTENSIONS = {"kicad": "kicad_pcb", "eagle": "brd"}
+
+
+def file_candidates(query: str, org: str, tool: str = "") -> list[Repo]:
+    """Repositories holding a design file, found by searching the files.
+
+    GitHub refuses code search without a token, so this is what a token buys
+    beyond a bigger allowance: hardware is found by the files themselves
+    rather than by what somebody called the repository.  SparkFun keeps
+    seventeen KiCad boards in `Hardware` folders inside repositories named
+    after the board's product, none of which a name search reaches.
+
+    The branch is deliberately left blank: a code search result does not say
+    what the default branch is, and `designs` looks it up.
+    """
+    if not token():
+        return []
+    extension = EXTENSIONS.get(tool, EXTENSIONS["kicad"])
+    terms = f"{query} org:{org} extension:{extension}".strip()
+    url = f"{API}/search/code?{urllib.parse.urlencode({'q': terms, 'per_page': '30'})}"
+    try:
+        payload = _get_json(url)
+    except SourceError:
+        # Code search is refused for some accounts and rejects some queries;
+        # neither is a reason to fail a search that has another way in.
+        return []
+
+    out: list[Repo] = []
+    seen: set[str] = set()
+    for item in payload.get("items", []):
+        holder = item.get("repository") or {}
+        full = holder.get("full_name") or ""
+        if not full or full in seen:
+            continue
+        seen.add(full)
+        owner = (holder.get("owner") or {}).get("login", "")
+        out.append(Repo(owner=owner, name=holder.get("name", ""),
+                        description=(holder.get("description") or "").strip(),
+                        branch="", url=holder.get("html_url") or "",
+                        described=False))
+    return out
+
+
+def _candidates(query: str, wanted: list[str], depth: int,
+                tool: str = "") -> tuple[list[Repo], list[str]]:
     """Repositories worth opening, taken a row at a time from each vendor.
 
     `depth` is how many to offer per account, and it follows the inspection
@@ -313,7 +362,9 @@ def _candidates(query: str, wanted: list[str], depth: int) -> tuple[list[Repo], 
     problems: list[str] = []
 
     for org in wanted:
-        group: list[Repo] = []
+        # Files first: a hit is a design file that exists, which beats any
+        # guess made from a name.
+        group: list[Repo] = list(file_candidates(query, org, tool))
         source = source_for(org)
         for name in (source.catalogs if source else ()):
             try:
@@ -326,7 +377,9 @@ def _candidates(query: str, wanted: list[str], depth: int) -> tuple[list[Repo], 
             group.extend(_search_org(query, org, per_org))
         except SourceError as exc:
             problems.append(f"{org}: {exc}")
-        rows.append(group)
+        known = set()
+        rows.append([r for r in group
+                     if not (r.full_name in known or known.add(r.full_name))])
 
     out: list[Repo] = []
     seen: set[str] = set()

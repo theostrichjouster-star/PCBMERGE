@@ -169,6 +169,74 @@ def test_a_result_arrives_with_its_designs_already(monkeypatch):
     assert [d.name for d in found.repos[0].designs] == ["board"]
 
 
+def code_hit(owner: str, name: str, path: str) -> dict:
+    return {"path": path, "repository": {
+        "full_name": f"{owner}/{name}", "name": name,
+        "owner": {"login": owner}, "description": "", "html_url": ""}}
+
+
+def test_without_a_token_no_file_search_is_attempted(monkeypatch):
+    """GitHub refuses code search outright when it is not authenticated."""
+    seen = fake_github(monkeypatch, {"org%3Asparkfun": {"items": []}})
+
+    assert sources.file_candidates("x", "sparkfun") == []
+    assert not any("search/code" in url for url in seen)
+
+
+def test_a_token_buys_a_search_of_the_files_themselves(monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "secret")
+    fake_github(monkeypatch, {"search/code": {"items": [
+        code_hit("sparkfun", "Lumenati_90L", "Hardware/Lumenati_90L.kicad_pcb"),
+        code_hit("sparkfun", "Lumenati_90L", "Production/panel.kicad_pcb"),
+        code_hit("sparkfun", "Roller", "Hardware/Roller.kicad_pcb"),
+    ]}})
+
+    found = sources.file_candidates("lumenati", "sparkfun")
+
+    assert [r.full_name for r in found] == ["sparkfun/Lumenati_90L", "sparkfun/Roller"]
+    # The branch is not in a code search result, so it is looked up later.
+    assert all(r.branch == "" for r in found)
+    assert all(r.described is False for r in found)
+
+
+def test_the_file_search_looks_for_the_tool_asked_for(monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "secret")
+    seen = fake_github(monkeypatch, {"search/code": {"items": []}})
+
+    sources.file_candidates("x", "sparkfun", tool="eagle")
+
+    assert "extension%3Abrd" in seen[0]
+
+
+def test_a_refused_file_search_does_not_sink_the_rest(monkeypatch):
+    """Code search is refused for some accounts and rejects some queries."""
+    monkeypatch.setenv("GITHUB_TOKEN", "secret")
+
+    def answer(url: str) -> dict:
+        if "search/code" in url:
+            raise SourceError("GitHub answered 422 Unprocessable Entity")
+        if "git/trees" in url:
+            return PAIR
+        return {"items": [repo_item("sparkfun", "S1")]}
+
+    monkeypatch.setattr(sources, "_get_json", answer)
+
+    assert [r.full_name for r in sources.search("board", orgs=["sparkfun"]).repos]         == ["sparkfun/S1"]
+
+
+def test_a_repository_found_both_ways_is_opened_once(monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "secret")
+    fake_github(monkeypatch, {
+        "search/code": {"items": [code_hit("sparkfun", "S1", "Hardware/x.kicad_pcb")]},
+        "org%3Asparkfun": {"items": [repo_item("sparkfun", "S1")]},
+        "git/trees": PAIR,
+    })
+
+    found = sources.search("board", orgs=["sparkfun"])
+
+    assert found.inspected == 1
+
+
 def test_a_catalogue_is_opened_even_when_its_name_says_nothing(monkeypatch):
     """Repository search reads a name and a description, never the files."""
     fake_github(monkeypatch, {

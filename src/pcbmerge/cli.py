@@ -488,8 +488,13 @@ def cmd_search(args: argparse.Namespace) -> int:
 
     for repo in found.repos:
         print()
-        print(f"  {b}{_safe(repo.full_name)}{o}  {d}{repo.vendor}, "
-              f"{repo.stars} star(s), updated {repo.updated or 'unknown'}{o}")
+        # A file search says nothing about stars or dates, so nothing is
+        # claimed about them rather than reporting a confident zero.
+        detail = repo.vendor
+        if repo.described:
+            detail += (f", {repo.stars} star(s), "
+                       f"updated {repo.updated or 'unknown'}")
+        print(f"  {b}{_safe(repo.full_name)}{o}  {d}{detail}{o}")
         if repo.description:
             print(f"    {_safe(repo.description[:96])}")
         _print_designs(repo.designs, d, o)

@@ -145,6 +145,14 @@ Design files usually sit in a subfolder rather than at the top of a repository, 
 `Hardware` folder being the common one, and the whole repository is read so it makes
 no difference where they are or what the folder is called.
 
+**With a token, the files themselves are searched.** That is what finds hardware a
+name search never reaches. SparkFun keeps seventeen KiCad boards in `Hardware`
+folders inside repositories named after the product, and Adafruit files KiCad work
+inside its learning-system guides; no search for a part reaches either by name.
+Set `GITHUB_TOKEN` and searching `--tool kicad` returns them from all three accounts.
+Without a token GitHub refuses to search files at all, and the search falls back to
+names plus the vendors' catalogue repositories.
+
 Results come back a row at a time from each account, so one vendor cannot crowd out
 the others. Within an account, a repository whose own name answers the query is
 opened first, and hardware is pulled above software after that. An account holds the
@@ -153,7 +161,8 @@ the board has to be picked out by its name or the budget goes on the writing abo
 it.
 
 `--vendor` narrows the search to one account, and `--tool` to one of the two
-formats. A vendor that has ported a board keeps the EAGLE pair and the KiCad
+formats. A file search looks for KiCad boards unless `--tool eagle` asks otherwise,
+because KiCad is where searching by name falls down. A vendor that has ported a board keeps the EAGLE pair and the KiCad
 project side by side under the same name, and they are listed separately so you
 can take the one you want rather than all four files:
 

@@ -809,6 +809,7 @@ function renderResults() {
     head.append(el("span", "name", repo.repo));
     head.append(el("span", "chip part", repo.vendor));
     head.append(el("span", "sub", countLabel(repo)));
+    if (repo.described === false) head.title = "found by searching files";
     head.onclick = () => {
       repo.open = !repo.open;
       renderResults();

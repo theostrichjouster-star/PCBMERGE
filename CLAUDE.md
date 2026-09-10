@@ -214,6 +214,14 @@ to accommodate it.
 - **Design files are usually in a subfolder** (`Hardware/` is the common one). The
   whole tree is read, so nothing depends on where they are or what the folder is
   called.
+- **A token buys a file search, not just a bigger allowance.** `file_candidates`
+  uses GitHub code search, which is refused outright without one, to find the design
+  files themselves. This is the only thing that reaches SparkFun's seventeen KiCad
+  boards, filed under product names in `Hardware/` folders. It looks for KiCad unless
+  `--tool eagle` says otherwise, because KiCad is where name search fails. A refusal
+  degrades to the name search rather than failing the whole thing.
+- **A code search result carries no branch, stars or dates.** The branch is looked up
+  by `designs`; `Repo.described` is False so nothing claims a confident zero.
 - **A result is a design, not a repository.** Repository search matches names and
   descriptions, never file contents, so it both returns repositories with no hardware
   and misses hardware in a repository named after something else. Every candidate is
