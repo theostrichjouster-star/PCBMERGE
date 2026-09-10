@@ -545,6 +545,13 @@ def serve(port: int = 8765, open_browser: bool = True, verbose: bool = False,
     url = f"http://{HOST}:{port}/"
 
     print(f"pcbmerge is running at {url}")
+    # Whether a token was picked up is worth saying out loud: setting one is
+    # easy to get wrong, and the only symptom otherwise is a search that finds
+    # less than it should an hour later.
+    if sources.token():
+        print("GITHUB_TOKEN found; searching files as well as names.")
+    else:
+        print("No GITHUB_TOKEN; searching names only, a few times an hour.")
     print("Nothing is written until you press Merge.  Ctrl-C to stop.")
     if open_browser:
         threading.Timer(0.4, lambda: webbrowser.open(url)).start()

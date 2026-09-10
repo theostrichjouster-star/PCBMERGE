@@ -209,7 +209,24 @@ makes them expensive. Answers are cached for ten minutes, and a search stops aft
 eighteen repositories rather than spending the whole hour on one query.
 
 Setting `GITHUB_TOKEN` (or `GH_TOKEN`) to a personal access token raises the limit
-considerably. No scopes are needed for public repositories.
+considerably and turns on the file search. No scopes are needed for public
+repositories.
+
+An environment variable is set differently in each shell, and a token in the wrong
+place fails quietly:
+
+```powershell
+$env:GITHUB_TOKEN = 'your_token'   # PowerShell
+pcbmerge web
+```
+
+```bash
+export GITHUB_TOKEN=your_token     # bash, zsh, Git Bash
+pcbmerge web
+```
+
+`pcbmerge web` says on startup whether it found one, so you can tell at a glance
+rather than an hour later.
 
 ## KiCad designs
 
