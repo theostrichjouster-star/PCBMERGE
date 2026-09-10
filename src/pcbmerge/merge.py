@@ -91,6 +91,7 @@ class MergeReport:
     dropped_parts: int = 0
     converted: list[str] = field(default_factory=list)
     sheet_extent: tuple[float, float, float, float] | None = None
+    placed_by_hand: list[str] = field(default_factory=list)
     outline: tuple[float, float] | None = None
     placements: list[layout.Placement] = field(default_factory=list)
     before: layout.LayoutStats | None = None
@@ -420,14 +421,26 @@ class Merger:
 
     # -- schematic packing --------------------------------------------------
     def _sheet_tiles(self) -> dict[str, tuple[float, float]]:
-        """Where each design's drawing goes on the shared sheet."""
+        """Where each design's drawing goes on the shared sheet.
+
+        Anything placed by hand keeps the corner it was dropped at; the rest
+        is packed around it as before.
+        """
+        sizes = self._sheet_sizes()
+        tiles = layout.sheet_tiles(sizes)
+        known = {d.name for d in self.designs}
+        tiles.update({name: spot for name, spot in self.plan.spots("sheet").items()
+                      if name in known})
+        return tiles
+
+    def _sheet_sizes(self) -> list[tuple[str, float, float]]:
+        """Each design's drawing, with room above it for its caption."""
         sizes: list[tuple[str, float, float]] = []
         for design in self.designs:
             box = self._sheet_extent(design)
-            # Leave room above each block for its caption.
             sizes.append((design.name, box[2] - box[0],
                           box[3] - box[1] + CAPTION_GAP + float(CAPTION_SIZE)))
-        return layout.sheet_tiles(sizes)
+        return sizes
 
     def _sheet_extent(self, design: Design) -> tuple[float, float, float, float]:
         """Bounds of a design's schematic, ignoring its page border."""
@@ -521,6 +534,24 @@ class Merger:
         return node
 
     # -- preview ------------------------------------------------------------
+    def sheet_preview(self) -> list[dict]:
+        """Where each drawing would sit on the shared sheet.
+
+        The same tiling the schematic build uses, reported rather than drawn,
+        so the page can show the sheet and let someone rearrange it.  A lone
+        design is not tiled at all -- it keeps the coordinates it was drawn
+        at -- so the preview says the same.
+        """
+        sizes = self._sheet_sizes()
+        tiles = self._sheet_tiles() if len(self.designs) > 1 else {}
+        out: list[dict] = []
+        for design, (_, width, height) in zip(self.designs, sizes):
+            box = self._sheet_extent(design)
+            x, y = tiles.get(design.name, (box[0], box[1]))
+            out.append({"design": design.name, "x": x, "y": y,
+                        "width": width, "height": height})
+        return out
+
     def preview(self) -> dict:
         """Where the boards would land, and what would still need routing.
 
@@ -531,7 +562,8 @@ class Merger:
         boards = [d for d in self.designs if d.brd is not None]
         self.report.outline = layout.parse_outline(self.plan.outline)
         if not boards:
-            return {"outline": self.report.outline, "placements": [], "airwires": []}
+            return {"outline": self.report.outline, "placements": [],
+                    "airwires": [], "sheet": self.sheet_preview()}
 
         placements = self._place(boards)
         offsets = {p.design: p for p in placements}
@@ -550,6 +582,7 @@ class Merger:
             "outline": self.report.outline,
             "placements": placements,
             "airwires": airwires,
+            "sheet": self.sheet_preview(),
         }
 
     # -- board --------------------------------------------------------------
@@ -684,6 +717,18 @@ class Merger:
             style=self.plan.layout, gap=self.plan.gap, columns=self.plan.columns,
             goal=self.plan.optimize, origin=origin, max_width=max_width,
         )
+
+        # Hand placements are applied after the search rather than constraining
+        # it, so the boards left to the packer are still arranged well among
+        # themselves.  The reported cost is then measured from what actually
+        # results, not from the arrangement the search settled on.
+        spots = self.plan.spots("board")
+        if spots:
+            placements = layout.pin(placements, measured, spots)
+            after = layout.stats(placements, measured, centroids)
+            self.report.placed_by_hand = sorted(
+                spots.keys() & {p.design for p in placements})
+
         self.report.before = before
         self.report.after = after
         self._check_fit(placements)

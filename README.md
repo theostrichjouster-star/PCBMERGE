@@ -60,6 +60,43 @@ The server binds to the loopback address and reads and writes files as you, whic
 is right for a tool you start yourself and wrong for anything exposed to a
 network. It needs no internet connection and loads nothing from a CDN.
 
+## Placing designs yourself
+
+The packer arranges everything by default. When you want a particular board in a
+particular corner, put it there: drag it, or focus it and use the arrow keys.
+Everything you have not touched is still packed around what you have.
+
+The front end draws two views of the same merge, and the toggle above the canvas
+switches between them.
+
+- **Board** is the arrangement inside the outline, with the airwires that will
+  still need routing.
+- **Schematic** is the shared sheet, one block per design, which is what the
+  single output sheet will look like.
+
+A design is placed separately in each. Pinning a board does not move its drawing,
+because the two have nothing to do with each other: a board sits where the copper
+has to go, a drawing sits where it reads well.
+
+Dragging snaps to the millimetre on the board and to a tenth of an inch on the
+sheet, which is the grid EAGLE draws schematics on. Hold Shift to move freely.
+Arrow keys nudge by one snap and Shift with an arrow by ten, so the whole
+arrangement is reachable without a mouse. Delete hands a block back to the packer,
+and **Auto-place** hands back everything in the current view.
+
+A block placed by hand is outlined in orange with a dot in its corner, and the
+count is reported under the canvas. The cost shown above it is measured from where
+things actually ended up, not from the arrangement the search settled on before
+your placements were applied.
+
+Hand placements are part of the plan, so a merge that used them replays exactly:
+
+```json
+"positions": [
+  { "design": "wio_terminal", "view": "board", "x": 32.0, "y": 45.5 }
+]
+```
+
 ## Finding designs to merge
 
 Adafruit, SparkFun and Seeed Studio publish their hardware on GitHub as the same
@@ -637,6 +674,8 @@ pcbmerge check out/combo
 
 - Writes EAGLE only. Reads EAGLE and KiCad; Altium is not supported.
 - Search covers the three vendor accounts only, and reads public repositories.
+- Designs are placed by hand as whole blocks. Moving one part within a
+  design is a job for EAGLE, on the merged file.
 - A KiCad schematic's drawing is not converted. The schematic is rebuilt from the
   board netlist as boxes with one pin per pad.
 - KiCad copper pours come across as their outline polygons, not as the filled shape

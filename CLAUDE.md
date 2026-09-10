@@ -83,7 +83,7 @@ signals no schematic net matches, which EAGLE rejects.
 | `nets.py` | Classify net names; decide join or split |
 | `linking.py` | Propose connections between differently named nets |
 | `pruning.py` | Catalogue parts; work out what a set of drop rules removes |
-| `layout.py` | Measure boards, pack them, search for a cheaper arrangement |
+| `layout.py` | Measure boards, pack them, search for a cheaper arrangement, pin them |
 | `plan.py` | Serialise every decision to JSON so a merge is replayable |
 | `prompt.py` | The interactive questions |
 | `merge.py` | Apply the maps, build the two documents |
@@ -146,6 +146,25 @@ Translated rather than copied: Y is negated (KiCad counts down), so rotations ch
 back-side footprints mirror; arcs go from three points to an included angle; net names keep
 only their leaf (`/Sheet/VCC_3V3` → `VCC_3V3`) or no rail would match, and `Net-(U1-Pad2)`
 becomes `N$1` so the resolver treats it as anonymous.
+
+### Hand placement
+
+A `Spot` in the plan pins one design in one view (`board` or `sheet`). The two are
+independent by design: a board sits where the copper has to go, a drawing sits
+where it reads well.
+
+- **`layout.pin` rewrites both halves of a `Placement`**, the translation and the
+  resulting edges. Setting only one draws a board in one place and writes it out
+  in another.
+- **Pins are applied after the search, not as a constraint on it**, so the boards
+  left to the packer are still arranged well among themselves. Because of that
+  `report.after` must be recomputed from the final placements, or the cost shown
+  describes an arrangement nobody gets.
+- **A pin for a design that is not in the merge is ignored**, never an error.
+  Changing a copy count must not invalidate everything else.
+- **`preview()` and `sheet_preview()` are the only sources for the two views.**
+  The page never computes a position itself; a picture that disagreed with the
+  file would be worse than no picture.
 
 ### Vendor search
 

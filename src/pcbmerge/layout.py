@@ -11,7 +11,7 @@ from __future__ import annotations
 import math
 import random
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass, field
+from dataclasses import dataclass, replace, field
 
 from .eagle import bbox
 
@@ -195,6 +195,30 @@ def _shelf(boards: list[Board], gap: float, origin: tuple[float, float],
     return placements
 
 
+def pin(placements: list[Placement], boards: list[Board],
+        spots: dict[str, tuple[float, float]]) -> list[Placement]:
+    """Move named boards to exact positions and leave the rest where they are.
+
+    A placement carries both the translation applied to the board's geometry
+    and the edges that translation produces.  Setting one without the other
+    would draw a board in one place and write it out in another, so both are
+    recomputed from the board's own origin.
+    """
+    if not spots:
+        return placements
+    origins = {b.design: (b.min_x, b.min_y) for b in boards}
+    out: list[Placement] = []
+    for place in placements:
+        spot = spots.get(place.design)
+        if spot is None or place.design not in origins:
+            out.append(place)
+            continue
+        x, y = spot
+        min_x, min_y = origins[place.design]
+        out.append(replace(place, x=x, y=y, dx=x - min_x, dy=y - min_y))
+    return out
+
+
 def extent_of(placements: list[Placement]) -> tuple[float, float]:
     if not placements:
         return 0.0, 0.0
@@ -285,17 +309,17 @@ def optimize(
 
     order = list(range(len(boards)))
     baseline = lay([boards[i] for i in order])
-    base_stats = _stats(baseline, boards, centroids)
+    base_stats = stats(baseline, boards, centroids)
 
     weight_air, weight_area = WEIGHTS.get(goal, WEIGHTS["balanced"])
     if goal == "none" or len(boards) < 3:
         return baseline, base_stats, base_stats
 
-    def cost(stats: LayoutStats) -> float:
+    def cost(measured: LayoutStats) -> float:
         # Normalised against the starting arrangement so the two terms, which
         # are measured in different units, can be added meaningfully.
-        air = stats.airwire / base_stats.airwire if base_stats.airwire else 0.0
-        area = stats.area / base_stats.area if base_stats.area else 0.0
+        air = measured.airwire / base_stats.airwire if base_stats.airwire else 0.0
+        area = measured.area / base_stats.area if base_stats.area else 0.0
         return weight_air * air + weight_area * area
 
     rng = random.Random(seed)
@@ -318,22 +342,22 @@ def optimize(
             trial[a], trial[b] = trial[b], trial[a]
 
         candidate = lay([boards[i] for i in trial])
-        stats = _stats(candidate, boards, centroids)
-        if cost(stats) < best_cost - 1e-9:
-            best_cost = cost(stats)
+        trial_stats = stats(candidate, boards, centroids)
+        if cost(trial_stats) < best_cost - 1e-9:
+            best_cost = cost(trial_stats)
             best_order = trial
-            best_stats = stats
+            best_stats = trial_stats
             improved += 1
 
     final = lay([boards[i] for i in best_order])
-    best_stats = _stats(final, boards, centroids)
+    best_stats = stats(final, boards, centroids)
     best_stats.iterations = steps
     best_stats.improved = improved
     return final, base_stats, best_stats
 
 
-def _stats(placements: list[Placement], boards: list[Board],
-           centroids: dict[str, dict[str, tuple[float, float]]]) -> LayoutStats:
+def stats(placements: list[Placement], boards: list[Board],
+          centroids: dict[str, dict[str, tuple[float, float]]]) -> LayoutStats:
     width, height = extent_of(placements)
     return LayoutStats(
         airwire=airwire_length(placements, centroids),

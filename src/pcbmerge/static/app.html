@@ -306,10 +306,26 @@
                  font-weight: 600; pointer-events: none; }
   .board-size { fill: var(--ink-faint); font-size: 9.5px; font-family: var(--mono);
                 pointer-events: none; }
-  .airwire { stroke: var(--blue); stroke-width: .9; opacity: .48; fill: none; }
+  .airwire { stroke: var(--blue); stroke-width: .9; opacity: .48; fill: none;
+             transition: opacity .18s; }
+  svg.dragging .airwire { opacity: .1; }
   .airwire.hot { stroke: var(--accent); stroke-width: 1.8; opacity: 1; }
   .pad-dot { fill: var(--copper); opacity: .6; }
   .ruler { stroke: var(--line); stroke-width: 1; }
+
+  /* A block can be dragged, nudged with the arrow keys, or left to the
+     packer.  Pinning it is a state worth seeing without hovering, so a placed
+     block is outlined in the colour that means "you did this". */
+  .block { cursor: grab; }
+  .block.held { cursor: grabbing; }
+  .block.fixed { cursor: default; }
+  .block:focus { outline: none; }
+  .block:focus-visible .board-rect { stroke: var(--blue); stroke-width: 2.4; }
+  .block.pinned .board-rect { stroke: var(--accent); stroke-width: 1.9; }
+  .pin-mark { fill: var(--accent); }
+
+  .stage-head .seg { margin-left: 4px; }
+  .stage-head .stat.off { display: none; }
   .ruler-text { fill: var(--ink-faint); font-size: 9px; font-family: var(--mono); }
 
   .stage-foot {
@@ -463,11 +479,17 @@
 
     <div class="stage">
       <div class="stage-head" id="stage-head">
-        <div class="stat"><b id="s-size">—</b><span>board</span></div>
-        <div class="stat green"><b id="s-fill">—</b><span>fill</span></div>
-        <div class="stat wire"><b id="s-air">—</b><span>airwire</span></div>
+        <div class="stat" id="stat-1"><b id="s-size">—</b><span id="l-size">board</span></div>
+        <div class="stat green" id="stat-2"><b id="s-fill">—</b><span id="l-fill">fill</span></div>
+        <div class="stat wire" id="stat-3"><b id="s-air">—</b><span id="l-air">airwire</span></div>
         <div class="grow"></div>
         <div class="sub" id="hover-info"></div>
+        <button id="auto" class="small" title="Let the packer place everything again"
+                disabled>Auto-place</button>
+        <div class="seg" id="views">
+          <button data-view="board" class="on">Board</button>
+          <button data-view="sheet">Schematic</button>
+        </div>
       </div>
       <div class="canvas-wrap" id="canvas-wrap">
         <div class="placeholder" id="placeholder">
@@ -509,9 +531,16 @@ const state = {
   connections: [],
   links: [],
   decisions: {},
+  positions: [],        // {design, view, x, y} for anything placed by hand
+  view: "board",
+  focus: null,          // design to hand focus back to after a redraw
   data: null,
   hotNet: null,
 };
+
+// What a nudge or a drop rounds to. A board is dimensioned in millimetres; a
+// schematic is drawn on EAGLE's tenth-of-an-inch grid, so each snaps to its own.
+const SNAP = { board: 1, sheet: 2.54 };
 
 const online = {
   vendors: [],            // what the server says it can search
@@ -549,6 +578,7 @@ function payload() {
     connections: state.connections,
     links: state.links,
     decisions: state.decisions,
+    positions: state.positions,
     output: $("o-output").value.trim() || "merged",
     outDir: $("o-outdir").value.trim() || "out",
     savePlan: $("o-saveplan").checked,
@@ -605,6 +635,7 @@ function adopt(data) {
   state.connections = [];
   state.links = [];
   state.decisions = {};
+  state.positions = [];
   $("path").value = data.folder;
   showError("");
   renderDesigns();
@@ -1093,8 +1124,131 @@ function setHot(net) {
   $("hover-info").textContent = net ? `net ${net}` : "";
 }
 
-function drawBoard() {
-  const board = state.data.board;
+// ------------------------------------------------------------ hand placement
+
+function pinOf(view, design) {
+  return state.positions.find((p) => p.view === view && p.design === design);
+}
+
+function pinTo(view, design, x, y) {
+  const round = (v) => Math.round(v * 100) / 100;
+  const found = pinOf(view, design);
+  if (found) { found.x = round(x); found.y = round(y); }
+  else state.positions.push({ view, design, x: round(x), y: round(y) });
+}
+
+function release(view, design) {
+  state.positions = state.positions.filter(
+    (p) => !(p.view === view && p.design === design));
+}
+
+function pinnedIn(view) {
+  return state.positions.filter((p) => p.view === view).length;
+}
+
+/** Where a block is right now.
+
+    A drawn block remembers the position it was drawn at, but a nudge is
+    answered by the server and the canvas is only rebuilt when that answer
+    arrives.  Reading the pin instead means several presses in a row add up
+    rather than all measuring from the same stale corner. */
+function nowAt(view, item) {
+  const pin = pinOf(view, item.design);
+  return pin ? { x: pin.x, y: pin.y } : { x: item.x, y: item.y };
+}
+
+/** Make one drawn block movable, by pointer and by keyboard.
+
+    A drag alone would leave the arrangement out of reach of anyone not using
+    a mouse, so the same block takes arrow keys, and Delete hands it back to
+    the packer.  During a drag only the block itself moves; the airwires it
+    changes are recomputed on the server when it lands. */
+function movable(group, view, item, k) {
+  const svg = $("canvas");
+  group.setAttribute("tabindex", "0");
+  group.setAttribute("role", "button");
+  group.setAttribute("aria-label",
+    `${item.design}, ${item.x.toFixed(1)} by ${item.y.toFixed(1)} millimetres. ` +
+    `Drag or use the arrow keys to place it.`);
+
+  const say = (x, y) => {
+    $("hover-info").textContent =
+      `${item.design} · ${x.toFixed(1)}, ${y.toFixed(1)} mm`;
+  };
+
+  group.onpointerdown = (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    group.focus();
+    group.setPointerCapture(event.pointerId);
+    group.classList.add("held");
+    svg.classList.add("dragging");
+
+    const fromX = event.clientX, fromY = event.clientY;
+    const from = nowAt(view, item);
+    let moved = false, atX = from.x, atY = from.y;
+
+    group.onpointermove = (move) => {
+      const dx = move.clientX - fromX, dy = move.clientY - fromY;
+      if (!moved && Math.abs(dx) < 3 && Math.abs(dy) < 3) return;
+      moved = true;
+      let x = from.x + dx / k;
+      let y = from.y - dy / k;              // the screen counts y the other way
+      if (!move.shiftKey) {
+        const step = SNAP[view];
+        x = Math.round(x / step) * step;
+        y = Math.round(y / step) * step;
+      }
+      atX = x; atY = y;
+      group.setAttribute("transform",
+        `translate(${(x - item.x) * k} ${-(y - item.y) * k})`);
+      say(x, y);
+    };
+
+    const done = (up) => {
+      group.onpointermove = null;
+      group.onpointerup = null;
+      group.onpointercancel = null;
+      group.classList.remove("held");
+      svg.classList.remove("dragging");
+      try { group.releasePointerCapture(up.pointerId); } catch (err) { /* gone */ }
+      if (!moved) return;
+      state.focus = item.design;
+      pinTo(view, item.design, atX, atY);
+      analyze();
+    };
+    group.onpointerup = done;
+    group.onpointercancel = done;
+  };
+
+  group.onkeydown = (event) => {
+    const step = (event.shiftKey ? 10 : 1) * SNAP[view];
+    let { x, y } = nowAt(view, item);
+    if (event.key === "ArrowLeft") x -= step;
+    else if (event.key === "ArrowRight") x += step;
+    else if (event.key === "ArrowUp") y += step;
+    else if (event.key === "ArrowDown") y -= step;
+    else if (event.key === "Delete" || event.key === "Backspace") {
+      event.preventDefault();
+      state.focus = item.design;
+      release(view, item.design);
+      analyze();
+      return;
+    } else return;
+    event.preventDefault();
+    state.focus = item.design;
+    pinTo(view, item.design, x, y);
+    say(x, y);
+    // Held-down arrows coalesce into one request rather than one each.
+    schedule();
+  };
+}
+
+// ---------------------------------------------------------------- the canvas
+
+/** Fit a world rectangle in millimetres to the canvas, and hand back the
+    conversions plus a node maker, so both views draw the same way. */
+function canvasFor(minX, minY, maxX, maxY) {
   const svg = $("canvas");
   const wrap = $("canvas-wrap");
   svg.innerHTML = "";
@@ -1104,6 +1258,91 @@ function drawBoard() {
   const W = wrap.clientWidth || 800;
   const H = wrap.clientHeight || 600;
   const pad = 34;
+  const worldW = Math.max(1, maxX - minX);
+  const worldH = Math.max(1, maxY - minY);
+  const k = Math.min((W - pad * 2) / worldW, (H - pad * 2) / worldH);
+  const offX = (W - worldW * k) / 2;
+  const offY = (H - worldH * k) / 2;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+
+  const ns = "http://www.w3.org/2000/svg";
+  const add = (tag, attrs, cls, parent) => {
+    const node = document.createElementNS(ns, tag);
+    for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
+    if (cls) node.setAttribute("class", cls);
+    (parent || svg).append(node);
+    return node;
+  };
+
+  return {
+    svg, add, k, W, H,
+    sx: (x) => offX + (x - minX) * k,
+    sy: (y) => offY + (maxY - y) * k,   // millimetres are y-up, screens are not
+  };
+}
+
+/** One design drawn as a component body, labelled if the words fit. */
+function drawBlock(c, view, item, movableHere) {
+  const group = c.add("g", {}, "block");
+  const pinned = !!pinOf(view, item.design);
+  if (pinned) group.classList.add("pinned");
+  if (!movableHere) group.classList.add("fixed");
+
+  const title = c.add("title", {}, null, group);
+  title.textContent = `${item.design} · ${item.width.toFixed(1)} × ` +
+    `${item.height.toFixed(1)} mm`;
+
+  const rect = c.add("rect", {
+    x: c.sx(item.x), y: c.sy(item.y + item.height),
+    width: item.width * c.k, height: item.height * c.k, rx: 2,
+  }, "board-rect", group);
+  rect.onmouseenter = () => {
+    group.classList.add("hot");
+    rect.classList.add("hot");
+    $("hover-info").textContent = title.textContent;
+  };
+  rect.onmouseleave = () => {
+    group.classList.remove("hot");
+    rect.classList.remove("hot");
+    $("hover-info").textContent = "";
+  };
+
+  // Only label a block that has room for the words.  Drawing them regardless
+  // turns a crowded arrangement into a pile of overlapping text.
+  const boxW = item.width * c.k;
+  const boxH = item.height * c.k;
+  const fits = Math.floor((boxW - 12) / 6.1);
+  if (boxH > 22 && fits > 3) {
+    const short = item.design.length > fits
+      ? item.design.slice(0, Math.max(3, fits - 1)) + "…"
+      : item.design;
+    const label = c.add("text",
+      { x: c.sx(item.x) + 6, y: c.sy(item.y + item.height) + 15 },
+      "board-label", group);
+    label.textContent = short;
+  }
+  if (boxH > 40 && boxW > 66) {
+    const size = c.add("text",
+      { x: c.sx(item.x) + 6, y: c.sy(item.y + item.height) + 28 },
+      "board-size", group);
+    size.textContent = `${item.width.toFixed(1)} × ${item.height.toFixed(1)}`;
+  }
+  if (pinned && boxW > 14 && boxH > 14) {
+    c.add("circle", {
+      cx: c.sx(item.x) + boxW - 6, cy: c.sy(item.y + item.height) + 6, r: 2.6,
+    }, "pin-mark", group);
+  }
+
+  if (movableHere) movable(group, view, item, c.k);
+  if (state.focus === item.design) {
+    group.focus({ preventScroll: true });
+    state.focus = null;
+  }
+  return group;
+}
+
+function drawBoard() {
+  const board = state.data.board;
 
   // World bounds: the outline if there is one, else whatever was placed.
   let minX = 0, minY = 0, maxX = 0, maxY = 0;
@@ -1114,24 +1353,9 @@ function drawBoard() {
     minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
     maxX = Math.max(maxX, p.x + p.width); maxY = Math.max(maxY, p.y + p.height);
   });
-  const worldW = Math.max(1, maxX - minX);
-  const worldH = Math.max(1, maxY - minY);
-  const k = Math.min((W - pad * 2) / worldW, (H - pad * 2) / worldH);
-  const offX = (W - worldW * k) / 2;
-  const offY = (H - worldH * k) / 2;
 
-  const sx = (x) => offX + (x - minX) * k;
-  const sy = (y) => offY + (maxY - y) * k;   // millimetres are y-up, screens are not
-
-  const ns = "http://www.w3.org/2000/svg";
-  const add = (tag, attrs, cls) => {
-    const node = document.createElementNS(ns, tag);
-    for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
-    if (cls) node.setAttribute("class", cls);
-    svg.append(node);
-    return node;
-  };
-  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  const c = canvasFor(minX, minY, maxX, maxY);
+  const { add, sx, sy, k } = c;
 
   if (board.outline) {
     add("rect", {
@@ -1150,47 +1374,91 @@ function drawBoard() {
       { cx: sx(p.x), cy: sy(p.y), r: 1.6 }, "pad-dot"));
   });
 
-  board.placements.forEach((p) => {
-    const rect = add("rect", {
-      x: sx(p.x), y: sy(p.y + p.height),
-      width: p.width * k, height: p.height * k, rx: 2,
-    }, "board-rect");
-    rect.onmouseenter = () => {
-      rect.classList.add("hot");
-      $("hover-info").textContent =
-        `${p.design} · ${p.width.toFixed(1)} × ${p.height.toFixed(1)} mm`;
-    };
-    rect.onmouseleave = () => {
-      rect.classList.remove("hot");
-      $("hover-info").textContent = "";
-    };
-    // Only label a board that has room for the words.  Drawing them regardless
-    // turns a crowded arrangement into a pile of overlapping text.
-    const boxW = p.width * k;
-    const boxH = p.height * k;
-    const fits = Math.floor((boxW - 12) / 6.1);
-    if (boxH > 22 && fits > 3) {
-      const short = p.design.length > fits
-        ? p.design.slice(0, Math.max(3, fits - 1)) + "…"
-        : p.design;
-      const label = add("text",
-        { x: sx(p.x) + 6, y: sy(p.y + p.height) + 15 }, "board-label");
-      label.textContent = short;
-    }
-    if (boxH > 40 && boxW > 66) {
-      const size = add("text",
-        { x: sx(p.x) + 6, y: sy(p.y + p.height) + 28 }, "board-size");
-      size.textContent = `${p.width.toFixed(1)} × ${p.height.toFixed(1)}`;
-    }
-  });
+  board.placements.forEach((p) => drawBlock(c, "board", p, true));
 
   const stats = board.stats;
-  $("s-size").textContent = stats.width
-    ? `${stats.width} × ${stats.height}` : "—";
-  $("s-fill").textContent = stats.fill ? `${stats.fill}%` : "—";
-  $("s-air").textContent = stats.airwire ? `${Math.round(stats.airwire)} mm` : "—";
+  setStats(
+    ["board", stats.width ? `${stats.width} × ${stats.height}` : "—"],
+    ["fill", stats.fill ? `${stats.fill}%` : "—"],
+    ["airwire", stats.airwire ? `${Math.round(stats.airwire)} mm` : "—"]);
   $("foot-note").textContent =
-    `${board.placements.length} boards · ${board.airwires.length} nets span more than one`;
+    `${board.placements.length} boards · ${board.airwires.length} nets span more than one`
+    + hint("board");
+}
+
+// ------------------------------------------------------------ schematic view
+
+function drawSheet() {
+  const sheet = state.data.sheet;
+  if (!sheet || !sheet.blocks.length) {
+    $("canvas").style.display = "none";
+    $("placeholder").style.display = "grid";
+    setStats(["sheet", "—"], ["blocks", "—"], null);
+    $("foot-note").textContent = "";
+    return;
+  }
+
+  const [left, bottom, right, top] = sheet.extent;
+  const c = canvasFor(left, bottom, right, top);
+
+  // The page edge, so a block's position on the sheet is readable.
+  c.add("rect", {
+    x: c.sx(left), y: c.sy(top),
+    width: (right - left) * c.k, height: (top - bottom) * c.k,
+  }, "outline");
+  const size = c.add("text", { x: c.sx(left), y: c.sy(top) - 8 }, "ruler-text");
+  size.textContent =
+    `${Math.round(right - left)} × ${Math.round(top - bottom)} mm sheet`;
+
+  sheet.blocks.forEach((b) => drawBlock(c, "sheet", b, !sheet.single));
+
+  setStats(
+    ["sheet", `${Math.round(right - left)} × ${Math.round(top - bottom)}`],
+    ["blocks", String(sheet.blocks.length)],
+    null);
+  $("foot-note").textContent = sheet.single
+    ? "One design keeps the coordinates it was drawn at"
+    : `${sheet.blocks.length} drawings on one sheet` + hint("sheet");
+}
+
+function hint(view) {
+  const pinned = pinnedIn(view);
+  if (pinned) return ` · ${pinned} placed by hand`;
+  return " · drag a block, or use the arrow keys, to place it yourself";
+}
+
+function setStats(first, second, third) {
+  const put = (n, pair) => {
+    $(`stat-${n}`).classList.toggle("off", !pair);
+    if (!pair) return;
+    $(["", "l-size", "l-fill", "l-air"][n]).textContent = pair[0];
+    $(["", "s-size", "s-fill", "s-air"][n]).textContent = pair[1];
+  };
+  put(1, first); put(2, second); put(3, third);
+}
+
+// -------------------------------------------------------------- view control
+
+function drawStage() {
+  if (!state.data) return;
+  if (state.view === "sheet") drawSheet(); else drawBoard();
+  $("auto").disabled = pinnedIn(state.view) === 0;
+  [...$("views").children].forEach((b) => {
+    b.classList.toggle("on", b.dataset.view === state.view);
+  });
+}
+
+function setView(view) {
+  if (state.view === view) return;
+  state.view = view;
+  $("hover-info").textContent = "";
+  drawStage();
+}
+
+function autoPlace() {
+  if (!pinnedIn(state.view)) return;
+  state.positions = state.positions.filter((p) => p.view !== state.view);
+  analyze();
 }
 
 // -------------------------------------------------------------------- render
@@ -1200,7 +1468,7 @@ function render() {
   renderParts();
   renderNets();
   renderConnect();
-  drawBoard();
+  drawStage();
 
   const totals = state.data.totals;
   $("totals").textContent =
@@ -1260,7 +1528,11 @@ $("path").onkeydown = (e) => { if (e.key === "Enter") scan(); };
 $("merge").onclick = runMerge;
 ["o-outline", "o-gap", "o-layout", "o-optimize"]
   .forEach((id) => { $(id).oninput = schedule; $(id).onchange = schedule; });
-window.addEventListener("resize", () => { if (state.data) drawBoard(); });
+window.addEventListener("resize", () => { if (state.data) drawStage(); });
+[...$("views").children].forEach((button) => {
+  button.onclick = () => setView(button.dataset.view);
+});
+$("auto").onclick = autoPlace;
 
 fetch("/api/health").then((r) => r.json()).then((d) => {
   if (d.version) $("version").textContent = d.version;

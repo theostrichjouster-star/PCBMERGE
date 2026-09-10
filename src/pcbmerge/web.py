@@ -29,7 +29,9 @@ from . import kicad, linking, pruning, sources
 from .eagle import EagleDoc, EagleError, design_stem
 from .merge import Merger, build_resolver, load_designs, merge
 from .nets import Action, Kind
-from .plan import DesignSpec, MergePlan, apply_plan, default_prefix, design_name, expand
+from .plan import (
+    DesignSpec, MergePlan, Spot, apply_plan, default_prefix, design_name, expand,
+)
 
 HOST = "127.0.0.1"
 STATIC = Path(__file__).parent / "static"
@@ -306,8 +308,26 @@ def _plan(body: dict) -> tuple[list[DesignSpec], MergePlan]:
         optimize=options.get("optimize", "balanced"),
         outline=options.get("outline", MergePlan().outline),
         gap=float(options.get("gap", 5.0)),
+        positions=_positions(body),
     )
     return specs, plan
+
+
+def _positions(body: dict) -> list[Spot]:
+    """Hand placements the page is holding, one per design and view."""
+    out: list[Spot] = []
+    for item in body.get("positions") or []:
+        if not isinstance(item, dict):
+            continue
+        view = item.get("view")
+        if view not in ("board", "sheet") or not item.get("design"):
+            continue
+        try:
+            out.append(Spot(design=str(item["design"]), view=view,
+                            x=float(item["x"]), y=float(item["y"])))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
 
 
 def _resolve(body: dict):
@@ -378,6 +398,7 @@ def analyze(body: dict) -> dict:
         ],
         "availableNets": resolver.nets_by_design(),
         "board": _board(preview, merger),
+        "sheet": _sheet(preview, merger),
         "totals": {
             "parts": sum(len(d.sch.parts()) - len(d.dropped_parts) for d in designs),
             "dropped": merger.report.dropped_parts,
@@ -438,6 +459,27 @@ def _board(preview: dict, merger: Merger) -> dict:
     }
 
 
+def _sheet(preview: dict, merger: Merger) -> dict:
+    """The schematic sheet: where each drawing sits, and how big the page is."""
+    blocks = preview.get("sheet") or []
+    if not blocks:
+        return {"blocks": [], "extent": None}
+    left = min(b["x"] for b in blocks)
+    bottom = min(b["y"] for b in blocks)
+    right = max(b["x"] + b["width"] for b in blocks)
+    top = max(b["y"] + b["height"] for b in blocks)
+    return {
+        "blocks": [
+            {"design": b["design"], "x": round(b["x"], 2), "y": round(b["y"], 2),
+             "width": round(b["width"], 2), "height": round(b["height"], 2)}
+            for b in blocks
+        ],
+        "extent": [round(left, 2), round(bottom, 2),
+                   round(right, 2), round(top, 2)],
+        "single": len(blocks) < 2,
+    }
+
+
 def run_merge(body: dict) -> dict:
     """Write the files. The only action that touches the disk."""
     specs, plan, designs, resolver, _ = _resolve(body)
@@ -449,11 +491,13 @@ def run_merge(body: dict) -> dict:
     if body.get("savePlan"):
         from .plan import plan_from_resolver
 
-        saved = str(plan_from_resolver(
+        keep = plan_from_resolver(
             resolver, specs, output=plan.output, title=plan.output,
             drops=plan.drops, layout=plan.layout, optimize=plan.optimize,
             outline=plan.outline, gap=plan.gap,
-        ).save(out_dir / f"{stem}-plan.json"))
+        )
+        keep.positions = plan.positions
+        saved = str(keep.save(out_dir / f"{stem}-plan.json"))
 
     return {
         "sch": str(report.sch_path) if report.sch_path else None,
@@ -469,6 +513,7 @@ def run_merge(body: dict) -> dict:
         "joined": [{"name": name, "count": len(designs)}
                    for name, designs in report.joined_nets],
         "warnings": report.warnings,
+        "placedByHand": report.placed_by_hand,
     }
 
 

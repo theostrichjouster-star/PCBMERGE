@@ -256,6 +256,29 @@ and `none` removes them without drawing a replacement.
 The default lives in `layout.DEFAULT_OUTLINE` and nowhere else; `plan.py` imports
 it rather than repeating the literal, so the two cannot drift apart.
 
+### Hand placement
+
+A `Spot` in the plan pins one design in one view. `layout.pin` applies them, and
+it rewrites both halves of a `Placement`: the translation applied to the board's
+geometry and the edges that translation produces. Setting one without the other
+would draw a board in one place and write it out in another.
+
+Pins are applied **after** the search rather than constraining it. Constraining
+the search would be defensible, but applying afterwards means the boards left to
+the packer are still arranged well among themselves, which is what someone
+pinning one board actually wants. The consequence is that the search's own cost
+figures no longer describe the result, so `report.after` is recomputed from the
+final placements.
+
+The two views are pinned independently. A board sits where the copper has to go
+and a drawing sits where it reads well, so nothing is gained by tying them
+together. `MergePlan.spots(view)` returns one view's pins and the sheet tiler and
+the board placer each ask for their own.
+
+A pin naming a design that is not in the merge is ignored rather than being an
+error: changing the copy count or unticking a design should not invalidate the
+positions of everything else.
+
 ### Packing and search
 
 `_shelf()` packs boards into rows sized to their tallest member, targeting a roughly
@@ -302,6 +325,19 @@ it, because it only copied across the tags its page already had.
 test asserts a merged sheet's children match what a drawn sheet contains. The
 lesson generalises: writing a structurally valid element that real files never
 contain is still a way to produce a file the tool will not open.
+
+## Two views of one merge
+
+`Merger.preview()` reports the board arrangement and `Merger.sheet_preview()`
+reports the sheet, both running the same code the builders run and stopping
+before any XML is produced. The front end draws whichever the toggle selects.
+Neither is a second implementation of the placement: a picture that disagreed
+with the file would be worse than no picture.
+
+The sheet preview reports what `_one_sheet` would do, including the special case
+of a lone design, which is not tiled at all and keeps the coordinates it was drawn
+at. The page reads that and stops offering to move it, rather than accepting a
+drag the builder would ignore.
 
 ## Why joined nets stay unrouted
 
@@ -352,6 +388,12 @@ of overlapping text.
 `tests/conftest.py` builds small synthetic EAGLE designs that clash deliberately:
 same part names, same library names with different pad geometry, and a net set
 covering every bucket. Those tests run in milliseconds and pin the behaviour.
+
+`tests/test_placement.py` covers hand placement at every level it passes
+through: the geometry in `layout.pin`, the plan round trip, the merger honouring
+a pin in each view, and the API the page talks to. It also checks that a pinned
+drawing really moves on the written sheet, because a preview that disagreed with
+the file is the failure that matters.
 
 `tests/test_sources.py` never touches the network: GitHub is replaced with canned
 payloads, which is the only way to pin behaviour that would otherwise depend on

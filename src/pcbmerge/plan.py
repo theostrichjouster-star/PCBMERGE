@@ -6,7 +6,9 @@ copies of each, what prefix they get, which nets join, and which differently
 named nets were tied together by hand.  Edit it, commit it, feed it back.
 
 Plans written before version 4 may name a sheet layout.  That option is gone and
-is ignored on load; everything goes on one sheet now.
+is ignored on load; everything goes on one sheet now.  Version 5 adds hand
+placements; a plan without them simply lets the packer decide everything, which
+is what every earlier plan did.
 """
 
 from __future__ import annotations
@@ -20,7 +22,7 @@ from .eagle import sanitize_name
 from .layout import DEFAULT_OUTLINE
 from .nets import Action, Kind, NetResolver
 
-PLAN_VERSION = 4
+PLAN_VERSION = 5
 
 
 @dataclass
@@ -101,6 +103,22 @@ class ConnectDecision:
 
 
 @dataclass
+class Spot:
+    """A design put somewhere by hand rather than by the packer.
+
+    Positions are the bottom-left corner in millimetres, in the merged
+    drawing's own coordinates, which is what both the board and the sheet are
+    already measured in.  `view` says which of the two it applies to: a design
+    can be pinned on the board and still packed on the sheet.
+    """
+
+    design: str
+    view: str = "board"      # "board" or "sheet"
+    x: float = 0.0
+    y: float = 0.0
+
+
+@dataclass
 class MergePlan:
     output: str = "merged"
     title: str = "merged"
@@ -114,6 +132,7 @@ class MergePlan:
     outline: str = DEFAULT_OUTLINE
     gap: float = 5.0
     columns: int = 0
+    positions: list[Spot] = field(default_factory=list)
     version: int = PLAN_VERSION
 
     # -- serialisation ------------------------------------------------------
@@ -136,6 +155,7 @@ class MergePlan:
             outline=data.get("outline", DEFAULT_OUTLINE),
             gap=float(data.get("gap", 5.0)),
             columns=int(data.get("columns", 0)),
+            positions=[Spot(**s) for s in data.get("positions", [])],
             version=int(data.get("version", PLAN_VERSION)),
         )
 
@@ -150,6 +170,11 @@ class MergePlan:
         return cls.from_json(Path(path).read_text(encoding="utf-8"))
 
     # -- lookup -------------------------------------------------------------
+    def spots(self, view: str) -> dict[str, tuple[float, float]]:
+        """Hand placements for one view, as design -> (x, y)."""
+        return {s.design: (float(s.x), float(s.y))
+                for s in self.positions if s.view == view}
+
     def decision_for(self, key: str) -> NetDecision | None:
         for net in self.nets:
             if net.key == key:
