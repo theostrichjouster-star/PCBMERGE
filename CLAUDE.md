@@ -50,6 +50,12 @@ baseline; more means something regressed.**
 Reinstall fails with a permissions error while `pcbmerge web` is running, because the
 server holds `pcbmerge.exe`. Stop the server first.
 
+`web.py` is loaded into memory when the server starts, but `static/app.html` is read
+from disk on every request. A server left running across a change therefore serves the
+new page and answers with the old API, which looks like a feature silently not working
+rather than an error. Restart the server after touching `web.py`, and when a view
+reports no data, check the server's age before looking for a bug.
+
 ## Architecture
 
 ### The central invariant

@@ -48,6 +48,14 @@ beside it, which is the only way in on a machine with no display.
 - **Connections** wire one design's net to another's
 - **Write files** name, folder, and the Merge button
 
+Drag the divider between the panel and the canvas to give either one more room;
+the width is remembered. Arrow keys move it too, and double-clicking it goes back
+to the middle.
+
+The server reads the page from disk on every request but answers from the code it
+started with, so after an upgrade a running server can serve a page it is too old
+to answer. Stop it and start it again.
+
 Hovering a net highlights its airwires on the board; hovering a board names it.
 The numbers across the top are live, so the cost of a choice is visible before
 you commit to it. Joining the I2C bus on the eight sample designs takes the
