@@ -212,8 +212,25 @@ Setting `GITHUB_TOKEN` (or `GH_TOKEN`) to a personal access token raises the lim
 considerably and turns on the file search. No scopes are needed for public
 repositories.
 
-An environment variable is set differently in each shell, and a token in the wrong
-place fails quietly:
+**The easiest way is the panel.** Open Find designs online in `pcbmerge web`, paste a
+token, and press Save. It is checked against GitHub before it is kept, so you find
+out immediately whether it works and what it is worth, and every later run picks it
+up. The panel then shows only the last four characters, with a Remove button.
+
+It is written as plain text to your own settings folder, never inside a project,
+because a token in a working tree is a token waiting to be committed:
+
+```
+Windows   %APPDATA%\pcbmerge	oken
+otherwise ~/.config/pcbmerge/token
+```
+
+That is what every other tool holding a GitHub token does. Encrypting it with
+nowhere to keep the key would only look like protection.
+
+An environment variable still works and takes precedence, which lets one shell
+override the saved token for a single run. It is set differently in each shell, and
+a token in the wrong place fails quietly:
 
 ```powershell
 $env:GITHUB_TOKEN = 'your_token'   # PowerShell

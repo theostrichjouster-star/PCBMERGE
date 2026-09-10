@@ -154,8 +154,116 @@ _cache: dict[str, tuple[float, object]] = {}
 
 
 def token() -> str:
-    """A personal access token, if one is in the environment."""
-    return (os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or "").strip()
+    """The token to use, from the environment or from the saved one.
+
+    The environment wins so a shell can override what is saved for one run
+    without disturbing it.
+    """
+    from_env = (os.environ.get("GITHUB_TOKEN")
+                or os.environ.get("GH_TOKEN") or "").strip()
+    return from_env or stored_token()
+
+
+def token_source() -> str:
+    """Where the token in use came from, for saying so out loud."""
+    if (os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or "").strip():
+        return "environment"
+    return "saved" if stored_token() else ""
+
+
+def token_path() -> Path:
+    """Where a saved token lives.
+
+    Deliberately outside any project: a token in a working tree is a token
+    waiting to be committed.  It goes where the operating system keeps
+    per-user settings, which is already readable only by that user.
+    """
+    if os.name == "nt":
+        base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
+    else:
+        base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return Path(base) / "pcbmerge" / "token"
+
+
+def stored_token() -> str:
+    """The saved token, or nothing if none has been saved."""
+    try:
+        return token_path().read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def save_token(value: str) -> Path:
+    """Write a token down so every later run finds it.
+
+    It is stored as plain text, which is what every other tool that keeps a
+    GitHub token does; encrypting it without somewhere to keep the key would
+    only look like protection.  The file is made readable by its owner alone
+    where the platform allows that.
+    """
+    value = (value or "").strip()
+    if not value:
+        raise SourceError("no token given")
+    if any(ch.isspace() for ch in value):
+        raise SourceError("that does not look like a token; it has a space in it")
+
+    path = token_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(value + "\n", encoding="utf-8")
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass            # Windows has no mode bits; the profile is already private
+    return path
+
+
+def clear_token() -> bool:
+    """Forget the saved token. True if there was one."""
+    try:
+        token_path().unlink()
+        return True
+    except OSError:
+        return False
+
+
+def token_hint(value: str = "") -> str:
+    """The tail of a token, enough to tell two apart and no more."""
+    value = value or token()
+    return f"...{value[-4:]}" if len(value) > 8 else ""
+
+
+def check_token(value: str) -> dict:
+    """Ask GitHub what a token is worth before anything is saved.
+
+    Saving one that does not work would leave someone with a search that is
+    quietly no better than before.
+    """
+    value = (value or "").strip()
+    if not value:
+        raise SourceError("no token given")
+    request = urllib.request.Request(f"{API}/rate_limit", headers={
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "pcbmerge",
+        "Authorization": f"Bearer {value}",
+    })
+    try:
+        with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            raise SourceError("GitHub rejected that token") from exc
+        raise SourceError(f"GitHub answered {exc.code} {exc.reason}") from exc
+    except urllib.error.URLError as exc:
+        raise SourceError(f"could not reach api.github.com: {exc.reason}") from exc
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise SourceError(f"GitHub sent something unreadable: {exc}") from exc
+
+    resources = payload.get("resources") or {}
+    core = resources.get("core") or {}
+    return {
+        "requests": int(core.get("limit") or 0),
+        "files": "code_search" in resources,
+    }
 
 
 def _request(url: str, accept: str = "application/vnd.github+json") -> bytes:

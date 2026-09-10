@@ -16,6 +16,9 @@ import pytest
 from pcbmerge import cli, sources, web
 from pcbmerge.sources import RemoteDesign, SourceError
 
+# Kept before any fixture replaces it, so the real one can still be tested.
+REAL_TOKEN_PATH = sources.token_path
+
 
 @pytest.fixture(autouse=True)
 def cold_cache():
@@ -25,9 +28,15 @@ def cold_cache():
 
 
 @pytest.fixture(autouse=True)
-def no_token(monkeypatch):
+def no_token(monkeypatch, tmp_path):
+    """No token from anywhere, whatever the machine running this has saved.
+
+    A token saved on the developer's machine would otherwise change what these
+    tests exercise, and only on that machine.
+    """
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.setattr(sources, "token_path", lambda: tmp_path / "token")
 
 
 # --------------------------------------------------------------------------
@@ -66,6 +75,168 @@ def fake_github(monkeypatch, pages: dict):
 
     monkeypatch.setattr(sources, "_get_json", answer)
     return seen
+
+
+# --------------------------------------------------------------------------
+# the token
+# --------------------------------------------------------------------------
+
+def test_no_token_anywhere_means_no_token():
+    assert sources.token() == ""
+    assert sources.token_source() == ""
+    assert sources.token_hint() == ""
+
+
+def test_a_saved_token_is_used_by_the_next_run(monkeypatch):
+    sources.save_token("github_pat_abcdefghijklmnop")
+
+    assert sources.token() == "github_pat_abcdefghijklmnop"
+    assert sources.token_source() == "saved"
+    assert sources.token_hint() == "...mnop"
+
+
+def test_the_environment_wins_over_what_was_saved(monkeypatch):
+    """A shell has to be able to override the saved one for a single run."""
+    sources.save_token("github_pat_saved_one")
+    monkeypatch.setenv("GITHUB_TOKEN", "github_pat_from_the_shell")
+
+    assert sources.token() == "github_pat_from_the_shell"
+    assert sources.token_source() == "environment"
+
+
+def test_a_token_is_never_saved_inside_a_project(monkeypatch, tmp_path):
+    """A token in a working tree is a token waiting to be committed."""
+    monkeypatch.setenv("APPDATA", str(tmp_path / "roaming"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+
+    where = REAL_TOKEN_PATH()
+
+    assert where.is_absolute()
+    assert "pcbmerge" in where.parts
+    assert not str(where).startswith(str(Path.cwd()))
+
+
+def test_saving_nothing_is_refused():
+    with pytest.raises(SourceError, match="no token"):
+        sources.save_token("   ")
+
+
+def test_something_with_a_space_in_it_is_not_a_token():
+    """The commonest paste accident is picking up the words around it."""
+    with pytest.raises(SourceError, match="space in it"):
+        sources.save_token("Bearer github_pat_abcdefghijkl")
+
+
+def test_removing_says_whether_there_was_one():
+    assert sources.clear_token() is False
+
+    sources.save_token("github_pat_abcdefghijklmnop")
+
+    assert sources.clear_token() is True
+    assert sources.token() == ""
+
+
+def test_a_hint_is_too_little_to_be_worth_anything():
+    assert sources.token_hint("github_pat_abcdefghijklmnop") == "...mnop"
+    assert sources.token_hint("short") == ""
+
+
+def test_a_token_is_checked_before_it_is_trusted(monkeypatch):
+    body = json.dumps(
+        {"resources": {"core": {"limit": 5000}, "code_search": {"limit": 10}}})
+
+    class Answer:
+        def read(self):
+            return body.encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    sent = {}
+
+    def urlopen(request, timeout=0):
+        sent["auth"] = request.headers.get("Authorization")
+        return Answer()
+
+    monkeypatch.setattr(sources.urllib.request, "urlopen", urlopen)
+
+    checked = sources.check_token("github_pat_abcdefghijklmnop")
+
+    assert checked == {"requests": 5000, "files": True}
+    # The token being checked, not whatever happens to be saved.
+    assert sent["auth"] == "Bearer github_pat_abcdefghijklmnop"
+
+
+def test_a_token_github_will_not_take_is_reported(monkeypatch):
+    error = http_error(401, {})
+    monkeypatch.setattr(sources.urllib.request, "urlopen",
+                        lambda *a, **k: (_ for _ in ()).throw(error))
+
+    with pytest.raises(SourceError, match="rejected that token"):
+        sources.check_token("github_pat_abcdefghijklmnop")
+
+
+# -- the endpoint the page uses --------------------------------------------
+
+def test_the_page_is_told_about_the_token_and_never_told_it():
+    sources.save_token("github_pat_abcdefghijklmnop")
+
+    state = web._token_state()
+
+    assert state["hasToken"] is True
+    assert state["tokenSource"] == "saved"
+    assert state["tokenHint"] == "...mnop"
+    assert "abcdefghijklmnop" not in json.dumps(state)
+
+
+def test_saving_through_the_page_checks_first(monkeypatch):
+    monkeypatch.setattr(sources, "check_token",
+                        lambda value: {"requests": 5000, "files": True})
+
+    out = web.set_token({"token": "github_pat_abcdefghijklmnop"})
+
+    assert out["requests"] == 5000
+    assert sources.token() == "github_pat_abcdefghijklmnop"
+    assert "abcdefghijklmnop" not in json.dumps({k: v for k, v in out.items()
+                                                 if k != "saved"})
+
+
+def test_a_token_the_page_sends_is_not_saved_if_it_does_not_work(monkeypatch):
+    def refuse(value):
+        raise SourceError("GitHub rejected that token")
+
+    monkeypatch.setattr(sources, "check_token", refuse)
+
+    with pytest.raises(SourceError):
+        web.set_token({"token": "github_pat_abcdefghijklmnop"})
+    assert sources.token() == ""
+
+
+def test_the_page_is_warned_when_a_shell_will_win(monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "github_pat_from_the_shell")
+    monkeypatch.setattr(sources, "check_token",
+                        lambda value: {"requests": 5000, "files": True})
+
+    out = web.set_token({"token": "github_pat_abcdefghijklmnop"})
+
+    assert out["shadowed"] is True
+
+
+def test_the_page_can_remove_a_saved_token():
+    sources.save_token("github_pat_abcdefghijklmnop")
+
+    out = web.set_token({"remove": True})
+
+    assert out["removed"] is True
+    assert out["hasToken"] is False
+
+
+def test_saving_an_empty_token_through_the_page_is_refused():
+    with pytest.raises(ValueError, match="paste a token"):
+        web.set_token({"token": ""})
 
 
 # --------------------------------------------------------------------------

@@ -109,7 +109,7 @@ class Handler(BaseHTTPRequestHandler):
                         "canBrowse": can_browse(),
                         "vendors": [{"org": v.org, "label": v.label, "note": v.note}
                                     for v in sources.VENDORS],
-                        "hasToken": bool(sources.token())})
+                        **_token_state()})
         else:
             self._json({"error": "not found"}, 404)
 
@@ -118,6 +118,7 @@ class Handler(BaseHTTPRequestHandler):
         actions = {
             "/api/browse": browse,
             "/api/scan": scan,
+            "/api/token": set_token,
             "/api/search": search,
             "/api/repo": repository,
             "/api/import": import_designs,
@@ -202,6 +203,49 @@ def browse(body: dict) -> dict:
 # --------------------------------------------------------------------------
 # published designs
 # --------------------------------------------------------------------------
+
+def _token_state() -> dict:
+    """What the page needs to say about the token, and never the token.
+
+    Only the last four characters go out, which is enough to tell two apart
+    and no use to anyone who gets hold of it.
+    """
+    source = sources.token_source()
+    return {
+        "hasToken": bool(sources.token()),
+        "tokenSource": source,
+        "tokenHint": sources.token_hint(),
+        "tokenPath": str(sources.token_path()),
+    }
+
+
+def set_token(body: dict) -> dict:
+    """Save a token for good, or forget the saved one.
+
+    It is checked against GitHub before it is written: saving one that does
+    not work would leave someone with a search quietly no better than before.
+    """
+    if body.get("remove"):
+        removed = sources.clear_token()
+        return {"removed": removed, **_token_state()}
+
+    value = (body.get("token") or "").strip()
+    if not value:
+        raise ValueError("paste a token first")
+
+    checked = sources.check_token(value)
+    if sources.token_source() == "environment":
+        # An environment variable wins, so saying "saved" alone would be a lie.
+        saved = sources.save_token(value)
+        return {"saved": str(saved), "shadowed": True,
+                "requests": checked["requests"], "files": checked["files"],
+                **_token_state()}
+
+    saved = sources.save_token(value)
+    return {"saved": str(saved), "shadowed": False,
+            "requests": checked["requests"], "files": checked["files"],
+            **_token_state()}
+
 
 def search(body: dict) -> dict:
     """Repositories in the vendor accounts matching what was typed."""

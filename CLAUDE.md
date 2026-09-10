@@ -220,6 +220,17 @@ to accommodate it.
   boards, filed under product names in `Hardware/` folders. It looks for KiCad unless
   `--tool eagle` says otherwise, because KiCad is where name search fails. A refusal
   degrades to the name search rather than failing the whole thing.
+- **A token can be saved from the page.** `save_token` writes it to the platform's
+  per-user settings folder, never inside a project, and `token()` reads the
+  environment first so a shell can override it for one run. It is checked against
+  GitHub before being written; saving one that does not work leaves a search quietly
+  no better than before.
+- **The page is never sent the token**, only whether there is one and its last four
+  characters. `web._token_state()` is the only thing that crosses, and there is a
+  test asserting the value never appears in what it returns.
+- **Tests must not see a real saved token.** The autouse fixture in
+  `tests/test_sources.py` points `token_path` at `tmp_path`, or a token on the
+  machine running them changes what they exercise, and only on that machine.
 - **A code search result carries no branch, stars or dates.** The branch is looked up
   by `designs`; `Repo.described` is False so nothing claims a confident zero.
 - **A result is a design, not a repository.** Repository search matches names and
