@@ -221,7 +221,7 @@ It is written as plain text to your own settings folder, never inside a project,
 because a token in a working tree is a token waiting to be committed:
 
 ```
-Windows   %APPDATA%\pcbmerge	oken
+Windows   %APPDATA%\pcbmerge\token
 otherwise ~/.config/pcbmerge/token
 ```
 
