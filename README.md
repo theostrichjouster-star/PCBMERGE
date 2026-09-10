@@ -1,796 +1,87 @@
 # pcbmerge
 
-Combine several PCB designs into a single schematic and board, resolving net names
-automatically where the answer is certain and asking where it is not. Reads EAGLE
-(`.sch` / `.brd`) and KiCad (`.kicad_pcb`), and writes EAGLE.
+Combine several PCB designs into one schematic and one board.
 
-Point it at a folder of `.sch`/`.brd` pairs and it produces one merged pair that
-EAGLE will open: every part renamed apart, every library conflict preserved, the
-source boards packed into a compact arrangement, and the power rails already tied
-together.
+Point it at a folder of designs and it produces a single pair that EAGLE will
+open: every part renamed apart, every clashing library item kept side by side,
+the source boards packed into a compact arrangement, and the power rails already
+tied together. Reads EAGLE (`.sch` / `.brd`) and KiCad (`.kicad_pcb` /
+`.kicad_sch`); writes EAGLE.
 
-```bash
-pcbmerge merge examples/basic -o combo --out-dir out
-```
+The hard parts are naming, because everything collides, and net resolution,
+because deciding which `VCC` is the same wire as which other `VCC` is a judgement
+call. Names that state the node, like `GND` and `3V3`, are joined without asking.
+Names that only state a role, like `VCC` and `VIN`, are put to you, since joining
+a 5 V rail to a 3.3 V one because both are called `VCC` would be a bad afternoon.
 
-Place several copies of a design by appending `*N`:
-
-```bash
-pcbmerge merge controller.sch relay.sch*4 -o farm --out-dir out
-```
-
-## The visual front end
-
-The command line makes you decide before you can see anything. `pcbmerge web`
-serves the same engine over HTTP so you can decide against a picture:
+## Using it
 
 ```bash
-pcbmerge web examples/basic
-```
-
-That opens a browser on `127.0.0.1:8765` showing the merged board as it would be
-built: the outline, every source board packed inside it, and a copper line for
-each net that still needs routing. Change anything on the left and the picture
-redraws.
-
-**Choose folder** opens your operating system's own folder dialog. A browser will
-not tell a page where a chosen folder really lives, so the server opens the dialog
-instead, in a separate process: a modal window on a request thread would hold the
-server for as long as you left it open. You can still paste a path into the box
-beside it, which is the only way in on a machine with no display.
-
-- **Find designs online** search Adafruit, SparkFun and Seeed Studio, and save
-  what you pick into the folder you have open
-- **Designs** tick designs in or out and set how many copies of each
-- **Board** outline, gap, tiling and what the placement search optimises for
-- **Parts to leave out** every kind of part with its copy count, the ones nothing
-  is wired to starred, and one button to drop all of them
-- **Nets** what joined automatically, what needs a decision with a join/split
-  toggle, and the pairs that look like the same wire under different names
-- **Connections** wire one design's net to another's
-- **Write files** name, folder, and the Merge button
-
-Drag the divider between the panel and the canvas to give either one more room;
-the width is remembered. Arrow keys move it too, and double-clicking it goes back
-to the middle.
-
-The server reads the page from disk on every request but answers from the code it
-started with, so after an upgrade a running server can serve a page it is too old
-to answer. Stop it and start it again.
-
-Hovering a net highlights its airwires on the board; hovering a board names it.
-The numbers across the top are live, so the cost of a choice is visible before
-you commit to it. Joining the I2C bus on the eight sample designs takes the
-airwire total from 425 mm to 556 mm, which is the sort of thing worth seeing
-while you decide rather than afterwards.
-
-Nothing is written until you press Merge. Everything else only reads.
-
-The server binds to the loopback address and reads and writes files as you, which
-is right for a tool you start yourself and wrong for anything exposed to a
-network. It needs no internet connection and loads nothing from a CDN.
-
-## Placing designs yourself
-
-The packer arranges everything by default. When you want a particular board in a
-particular corner, put it there: drag it, or focus it and use the arrow keys.
-Everything you have not touched is still packed around what you have.
-
-The front end draws two views of the same merge, and the toggle above the canvas
-switches between them.
-
-- **Board** is the arrangement inside the outline, with the airwires that will
-  still need routing.
-- **Schematic** is the shared sheet, one block per design, which is what the
-  single output sheet will look like.
-
-A design is placed separately in each. Pinning a board does not move its drawing,
-because the two have nothing to do with each other: a board sits where the copper
-has to go, a drawing sits where it reads well.
-
-Dragging snaps to the millimetre on the board and to a tenth of an inch on the
-sheet, which is the grid EAGLE draws schematics on. Hold Shift to move freely.
-Arrow keys nudge by one snap and Shift with an arrow by ten, so the whole
-arrangement is reachable without a mouse. Delete hands a block back to the packer,
-and **Auto-place** hands back everything in the current view.
-
-A block placed by hand is outlined in orange with a dot in its corner, and the
-count is reported under the canvas. The cost shown above it is measured from where
-things actually ended up, not from the arrangement the search settled on before
-your placements were applied.
-
-Hand placements are part of the plan, so a merge that used them replays exactly:
-
-```json
-"positions": [
-  { "design": "wio_terminal", "view": "board", "x": 32.0, "y": 45.5 }
-]
-```
-
-## Finding designs to merge
-
-Adafruit, SparkFun and Seeed Studio publish their hardware on GitHub as the same
-EAGLE and KiCad files this tool reads. `search` looks through all three accounts
-at once, `fetch` brings a design down into a folder, and that folder is then an
-ordinary input.
-
-```bash
-pcbmerge search bme280
-pcbmerge fetch adafruit/Adafruit-BME280-Breakout-PCB --all --dest my-project
-pcbmerge merge my-project -o combo --out-dir out --yes
-```
-
-```
-6 repositories
-
-  adafruit/Adafruit-BME280-Breakout-PCB  Adafruit, 11 star(s), updated 2019-06-21
-    PCB files for the Adafruit BME280 Breakout
-
-  sparkfun/Qwiic_Atmospheric_Sensor_Breakout_BME280  SparkFun, 2 star(s), updated 2024-07-23
-    A basic Qwiic board to provide atmospheric data from the BME280.
-```
-
-**Every result holds at least one design.** A repository search matches a name and
-a description, never the files inside, so on its own it returns page after page of
-driver libraries and example code. Each candidate is opened and kept only if there
-is hardware in it.
-
-That also finds hardware whose repository is named after something else. Seven XIAO
-designs live in `Seeed-Studio/OPL_Kicad_Library`, whose name and description say
-nothing about XIAO, so no search for the part would ever have reached them. Each
-vendor's catalogue repositories are listed and always looked in, matched by the
-names of the designs they hold rather than the name of the repository.
-
-Design files usually sit in a subfolder rather than at the top of a repository, a
-`Hardware` folder being the common one, and the whole repository is read so it makes
-no difference where they are or what the folder is called.
-
-**With a token, the files themselves are searched.** That is what finds hardware a
-name search never reaches. SparkFun keeps seventeen KiCad boards in `Hardware`
-folders inside repositories named after the product, and Adafruit files KiCad work
-inside its learning-system guides; no search for a part reaches either by name.
-Set `GITHUB_TOKEN` and searching `--tool kicad` returns them from all three accounts.
-Without a token GitHub refuses to search files at all, and the search falls back to
-names plus the vendors' catalogue repositories.
-
-Results come back a row at a time from each account, so one vendor cannot crowd out
-the others. Within an account, a repository whose own name answers the query is
-opened first, and hardware is pulled above software after that. An account holds the
-board, its Arduino library and its hookup guide, and all three mention the part, so
-the board has to be picked out by its name or the budget goes on the writing about
-it.
-
-`--vendor` narrows the search to one account, and `--tool` to one of the two
-formats. A file search looks for KiCad boards unless `--tool eagle` asks otherwise,
-because KiCad is where searching by name falls down. A vendor that has ported a board keeps the EAGLE pair and the KiCad
-project side by side under the same name, and they are listed separately so you
-can take the one you want rather than all four files:
-
-```bash
-pcbmerge search qwiic --vendor sparkfun
-pcbmerge search xiao --tool kicad
-```
-
-Opening a repository costs a request, so a search opens at most eighteen and says
-so if it ran out. `--any` skips opening entirely, which costs one request per vendor
-and lists repositories whether or not they hold anything:
-
-```bash
-pcbmerge search xiao --any
-```
-
-`fetch` on its own lists what a repository holds and writes nothing:
-
-```
-adafruit/Adafruit-BME280-Breakout-PCB  Adafruit, branch master
-    Adafruit BME280                            eagle, .brd, .sch
-```
-
-Add `--all` to take every complete pair, or `--design` with a name or wildcard to
-take one. Both halves of a design are written under a single stem, because the
-merge finds the board by the schematic's name. Nothing from the repository is used
-as a path: only the extension survives, and a second copy of the same design gets
-its own stem rather than overwriting the first.
-
-The front end has the same thing as a panel. Tick the vendors, type a search, open a
-result to see its designs, and importing saves them **into the project folder you
-have open**, beside the designs already there. They appear in the Designs list
-straight away, and what you had already set on the other designs is kept.
-
-So a folder has to be open first. Import with none open and the panel says so and
-offers the folder dialog; choose one and the import carries on.
-
-### Rate limits
-
-GitHub allows about sixty unauthenticated requests an hour, and searches are counted
-separately at ten a minute. A search costs one request per vendor plus one for every
-repository it opens, which is what makes the results worth reading and also what
-makes them expensive. Answers are cached for ten minutes, and a search stops after
-eighteen repositories rather than spending the whole hour on one query.
-
-Setting `GITHUB_TOKEN` (or `GH_TOKEN`) to a personal access token raises the limit
-considerably and turns on the file search. No scopes are needed for public
-repositories.
-
-**The easiest way is the panel.** Open Find designs online in `pcbmerge web`, paste a
-token, and press Save. It is checked against GitHub before it is kept, so you find
-out immediately whether it works and what it is worth, and every later run picks it
-up. The panel then shows only the last four characters, with a Remove button.
-
-It is written as plain text to your own settings folder, never inside a project,
-because a token in a working tree is a token waiting to be committed:
-
-```
-Windows   %APPDATA%\pcbmerge\token
-otherwise ~/.config/pcbmerge/token
-```
-
-That is what every other tool holding a GitHub token does. Encrypting it with
-nowhere to keep the key would only look like protection.
-
-An environment variable still works and takes precedence, which lets one shell
-override the saved token for a single run. The panel keeps offering to save while
-a shell variable is supplying one, because that variable lasts only as long as the
-window it was typed in. It is set differently in each shell, and
-a token in the wrong place fails quietly:
-
-```powershell
-$env:GITHUB_TOKEN = 'your_token'   # PowerShell
 pcbmerge web
 ```
 
-```bash
-export GITHUB_TOKEN=your_token     # bash, zsh, Git Bash
-pcbmerge web
-```
+That opens a page on `127.0.0.1:8765`. Nothing is written until you press Merge.
 
-`pcbmerge web` says on startup whether it found one, so you can tell at a glance
-rather than an hour later.
+**Open a folder.** Choose folder opens your operating system's own dialog, or
+paste a path. Every design in it is listed, and you set how many copies of each
+you want.
 
-## KiCad designs
+**Watch the picture.** The canvas draws the merge as it would be built. Board
+view shows the source boards packed inside the outline, with a line for every net
+that still needs routing. Schematic view shows the shared sheet. Change anything
+on the left and both redraw.
 
-A `.kicad_pcb` can go into a merge beside EAGLE files, with no flag and nothing to
-convert by hand. Point the tool at a folder holding both and it works out which is
-which.
+**Move things yourself.** Drag a block, or focus it and use the arrow keys, and
+the packer fills in around whatever you have placed. Delete hands one back to it;
+Auto-place hands back everything in that view.
 
-```bash
-pcbmerge merge examples/basic -o combo --out-dir out --yes
-```
+**Answer the net questions.** What joined automatically is listed, what needs a
+decision has a join or split toggle, and pairs that look like the same wire under
+different names are offered as suggestions.
 
-The board is the source of truth. A KiCad board carries the whole netlist, every
-footprint with its pads and their nets, the copper and the outline, which is
-everything a merge needs. Footprints become packages, nets become signals, tracks
-and vias and pours come across, and the outline lands on the Dimension layer.
+**Leave parts out.** Mounting holes, fiducials and silkscreen labels are grouped
+by kind, with the ones nothing is wired to marked, so a crowded merge can be
+thinned in a couple of clicks.
 
-Two conventions differ and both are handled. KiCad measures Y downwards where EAGLE
-measures it up, so every Y is negated and rotations change sign with it. Footprints
-on the back come across mirrored.
+**Find designs online.** Adafruit, SparkFun and Seeed Studio publish their
+hardware on GitHub. Search from the panel and whatever you pick is downloaded
+into the project folder you have open, ready to merge with what is already there.
 
-Net names are normalised so they can match. A hierarchical KiCad name like
-`/Sheet One/VCC_3V3` becomes `VCC_3V3`, or no rail would ever line up with an EAGLE
-design's. Names KiCad invented, the `Net-(U1-Pad2)` form, become `N$1` and so are
-kept apart exactly as EAGLE's own anonymous nets are.
+A GitHub token is worth adding in that panel. Without one you get a few searches
+an hour and no file search, which is where most KiCad hardware is found. It needs
+no permissions for public designs, is checked before it is saved, and every later
+run picks it up.
 
-**The schematic is the one that was drawn.** A `.kicad_sch` beside the board is
-converted as it stands: the symbols with their real outlines and pins, where each
-was placed including rotation and mirroring, every wire and junction, and the
-labels. Hierarchical child sheets are read too and laid out one below another,
-since the output is a single sheet.
+**Then press Merge.** You get a `.sch` and a `.brd`. Open the board in EAGLE and
+run DRC; the airwires are the joined nets waiting to be routed.
 
-Two coordinate systems meet in that conversion and mixing them up is how you get a
-drawing that looks almost right. A KiCad **symbol** is stored y-up, exactly as
-EAGLE stores one, so symbol geometry crosses over untouched. A **sheet** is stored
-y-down, so placements, wires and labels have their y negated.
-
-**Nets still come from the board.** Connectivity is worked out from the drawing the
-way KiCad works it out, by following wires, junctions and pins, but each net takes
-its *name* from the board wherever a pin can be matched to a pad. The merged pair
-only opens if the schematic's nets and the board's signals agree, and a drawing that
-named its own nets would disagree on every unnamed one.
-
-When there is no usable drawing the old behaviour remains: the schematic is rebuilt
-from the board netlist as one box per part, with connections on labels. That happens
-when no `.kicad_sch` is published, or when the one published is a root sheet whose
-real content is in child files that were left out. The merge report says which.
-
-## The problem it solves
-
-Dropping two EAGLE designs into one file breaks in four separate ways at once.
-
-- **Reference designators collide.** Nearly every breakout board has an `R1` and a
-  `U$1`. Across the eight sample designs, `U$2` appears eight times.
-- **Libraries collide without being equal.** The samples carry eight different
-  libraries all called `microbuilder`, with genuinely different footprints inside.
-  Taking the first copy silently changes other boards' pad geometry.
-- **Net names mean different things.** `GND` in two designs is one node. `N$1` in
-  two designs is two unrelated nodes. `VCC` might be either, and only you know.
-- **Boards sit on top of each other.** Every design is drawn near its own origin.
-- **Two tools, two file formats.** KiCad stores S-expressions and measures Y the
-  other way up.
-
-pcbmerge handles all four, and keeps the schematic and the board consistent with
-each other, which is what EAGLE requires before it will let you route anything.
-
-## How nets are resolved
-
-Every net name is sorted into one of four buckets.
-
-| Bucket | Examples | What happens |
-| --- | --- | --- |
-| Joined automatically | `GND`, `VSS`, `0V`, `3.3V`, `+3V3`, `5V`, `VBUS` | One net across all designs |
-| Kept separate always | `N$1`, `N$7` | Renamed per design, never fused |
-| Asked about | `VCC`, `VDD`, `VIN`, `AGND`, `SDA`, `SCL`, `D+` | You decide |
-| Asked about, per copy | any net in a replicated design | One per copy, or common to all |
-
-The rule behind the split is whether the name states its own meaning. `GND` and
-`3.3V` do, so matching names are safe to join. `VCC` names a role instead of a
-voltage, so two boards can disagree about it, and joining them could put five volts
-onto a three-volt part. Those always come to you.
-
-Spelling differences are folded before comparison, so `3.3V`, `+3V3` and `3V3` are
-recognised as one rail. The merged file uses whichever spelling your inputs use
-most, with ties going to the design you listed first.
-
-Two nets inside a *single* design are never fused, even when they normalize alike.
-A board carrying both `3.3V` and `+3V3` has two nodes, and it keeps two.
-
-## Placing copies of a design
-
-Four relay boards on one panel is four instances of one file. Each copy gets a
-numbered prefix, so `R1` becomes `RELAY1_R1` through `RELAY4_R1`, and the same
-number carries onto the nets: `SIGNAL` becomes `RELAY1_SIGNAL` and so on. Parts,
-nets and footprints all increment together, which is what keeps the schematic and
-the board consistent.
-
-Rails are the exception. `GND` and `3.3V` stay a single net across every copy,
-because a name that states its own voltage means the same node wherever it appears.
-
-Everything else is a question, asked once per design rather than once per copy:
-
-```
-Adafruit_INA3221_Breakout: 3 copies.
-Which of these signals are common to all copies?
-Anything you do not pick becomes one net per copy.
-
-   1  ALERT
-   2  SCL
-   3  SDA
-   4  WARNING
-
-  numbers, 'a' for all, Enter for none: 2 3
-```
-
-Three copies of a current sensor share one I2C bus but have three separate alert
-lines. Three copies of a relay board share nothing but power. No rule can tell those
-apart, so the tool lists the candidates and lets you pick.
-
-Use `--replicas join` to make every replicated net common without being asked, or
-`--replicas split`, the default, to keep them all separate.
-
-## Connecting nets that are not spelled alike
-
-Name matching only finds the easy cases. A sensor board calling its bus `I2C_DATA`
-and a controller calling it `SDA` describe the same wire, and no normalisation rule
-will discover that. pcbmerge scores likely pairs and offers them:
-
-```
-[1/2]  confidence 78%
-  SDA                  Adafruit_INA3221_Breakout
-  I2C_DATA             Adafruit_ESP32-S3_8MB_No_PSRAM
-  why      same words plus I2C
-  connect these? [n] y/n/rename
-```
-
-The scorer is deliberately conservative, because a wrong suggestion costs more
-attention than a missed one. A missed connection stays visible as an unrouted net,
-while a wrong one has to be spotted and undone. Connector pin labels like `A0` and
-`D13` are never matched against each other, since they name a position rather than a
-signal. On the eight sample designs it proposes two pairs, not dozens.
-
-Answers default to no. To skip these questions entirely, pass `--no-suggest`.
-
-You can also state connections outright, which is what a plan records:
-
-```bash
-pcbmerge merge examples/basic --link SDA=I2C_DATA:BUS_SDA --link SCL=I2C_CLK
-```
-
-A link naming a net no design has is an error rather than a silent no-op, because
-linking a real net to a typo would quietly join the real one everywhere.
-
-## Leaving parts out
-
-Eight breakout boards bring eight page borders, twenty-two mounting holes,
-sixteen fiducials and ninety-four silkscreen pin labels. On one merged board
-almost none of that is wanted: the holes sit at each sub-board's old position and
-the fiducials belong to panels that no longer exist.
-
-See what is there, grouped by kind:
-
-```bash
-pcbmerge parts examples/basic
-```
-
-```
-461 parts in 8 design instances
-  161 of them are decoration: borders, holes, fiducials, silkscreen labels
-
- kind                          value        copies  designs   note
-*PLABEL                                         94        4   no connections
-*MOUNTINGHOLE                                   22        8   no connections
-*FIDUCIAL                                       16        8   no connections
-*FRAME_A4                                        4        4   no connections
-```
-
-Then leave kinds out with `--drop`, which matches the designator, the deviceset
-or the package, case-insensitively:
-
-```bash
-pcbmerge merge examples/basic --drop MOUNTINGHOLE --drop FIDUCIAL --drop PLABEL
-```
-
-Restrict a rule to one design with `esp32:FID*`. A rule matching nothing is an
-error, not a silent no-op, so a typo cannot quietly keep parts you meant to remove.
-
-Dropping is decided before anything is renamed, so a removed part never claims a
-designator a survivor could have had. It reaches the schematic and the board
-together, pins are pulled out of the nets they were on, and a net whose every pin
-belonged to removed parts goes too, on both sides at once. Removing something that
-was actually wired to a net is reported, since that changes the netlist:
-
-```
-Warnings
-  dropped Adafruit_MAX31850:R1, which had 4 connection(s)
-```
-
-Copper belonging to a signal that survives is kept even when one of its parts
-went away. It is real routing, and deleting it silently would be worse than
-leaving a stub you can see.
-
-## Connecting specific designs
-
-`--link` acts on a name wherever it appears. That is right for a bus, and wrong
-when a controller drives one board out of four copies. `--connect` names the
-instances:
-
-```bash
-pcbmerge merge controller.sch relay.sch*3 \
-  --connect 1:A0=2:SIGNAL --connect 1:A1=3:SIGNAL
-```
-
-Designs can be named by their listing number or by any unambiguous part of their
-name. The result is exactly what you asked for and nothing more:
-
-| net | reaches |
-| --- | --- |
-| `A0` | controller, relay copy 1 |
-| `A1` | controller, relay copy 2 |
-| `SIGNAL` | relay copy 3, on its own |
-
-Connecting two nets that live on the same design is refused, and so is naming a
-net no design has.
-
-Interactively, `merge` asks for these after the copy counts:
-
-```
-Connect nets between designs?  Enter to skip.
-Write them as  design:net = design:net,  for example
-  1:GPIO5 = 2:SIGNAL
-
-   1  Adafruit_ESP32-S3_8MB_No_PSRAM
-   2  Adafruit_Non-Latching_Relay_Breakout #1
-
-  connection (Enter when done):
-```
-
-## Board placement
-
-Source boards are packed rather than dropped into uniform cells, then the
-arrangement is searched for one that is both compact and short on airwires. Boards
-sharing many nets end up adjacent.
-
-```
-Board layout
-                 size (mm)    fill   airwire (mm)
-  start       76.1 x  112.8     57%            549
-  chosen      64.7 x  112.8     67%            420
-  11 improvement(s) over 4000 tries; airwire 129 mm shorter, board 1289 mm2 smaller
-```
-
-Airwire length is measured as a minimum spanning tree over each net's pad positions,
-which is the cheapest set of hops a router could use. Board element origins stand in
-for exact pad locations. That is accurate enough to rank arrangements, and much
-cheaper than resolving every footprint's pad geometry through its rotation.
-
-Control it with `--optimize`:
-
-| Value | Minimises |
-| --- | --- |
-| `balanced` | both, weighted toward airwire (default) |
-| `airwire` | connection length only |
-| `area` | board area only |
-| `none` | nothing, keeps input order |
-
-Pick the tiling with `--layout pack` (default), `row`, `column`, or `grid` for
-uniform cells.
-
-## The board outline
-
-The merged board gets one plain rectangle on the Dimension layer, 150 by 100 mm
-by default, and the sub-boards are packed to fit inside it. Each source board's
-own outline is discarded, because carrying eight of them over leaves a pile of
-overlapping rectangles rather than a board shape.
-
-```bash
-pcbmerge merge examples/basic --outline 80x100
-```
-
-| Value | Result |
-| --- | --- |
-| `150x100` | one rectangle that size (default) |
-| any `WxH` | one rectangle of your dimensions |
-| `keep` | every source board's outline, carried over in place |
-| `none` | outlines removed, nothing drawn |
-
-If the sub-boards do not fit, they are still placed and the overflow is reported
-with the size they actually need:
-
-```
-the sub-boards need 55 x 333 mm and overflow the 150 x 100 mm outline;
-give --outline a bigger size or move them by hand
-```
-
-## The schematic
-
-Every design lands on one sheet. Each drawing is packed into rows sized to their
-tallest member, so a page of one large and three small drawings does not pay for
-the large one four times, and each block is captioned with its design name on
-layer 97 (Info) so a crowded page stays navigable.
-
-Page borders are dropped, since eight overlapping A4 frames are only noise. A
-single design merged on its own keeps both its border and its original
-coordinates.
-
-Nets of the same name fold into one element carrying several segments. EAGLE
-writes one `<net>` per name per sheet, and two elements named `GND` on one sheet
-is not a form it accepts. On the eight samples, `GND` becomes one net with 88
-segments reaching all eight designs.
-
-Multi-sheet output was built and withdrawn. It emitted an empty `<moduleinsts/>`
-container that no hand-drawn file carries, and EAGLE 9.6.2 would not reliably open
-the result. One sheet is what works, so one sheet is what there is.
-
-## Commands
-
-### inspect
-
-See what would happen before anything is written.
-
-```bash
-pcbmerge inspect examples/basic
-```
-
-Reports each design's copy count and prefix, the library items that will need
-renaming, the nets that will join automatically, the ones needing a decision, and
-the differently named nets that might belong together.
-
-### merge
-
-Do the work. Without `--yes` it asks about links, copies and contested nets.
-
-```bash
-pcbmerge merge examples/basic -o combo --out-dir out
-```
-
-```
-[1/16]
-  net      SDA
-  used by  2 designs: Adafruit_ESP32-S3_8MB_No_PSRAM, Adafruit_INA3221_Breakout
-  why ask  shared signal name
-  join / split / rename? [s]
-```
-
-Answer `j` to join, `s` to keep apart, `r` to join under a name you choose, or `a`
-to apply the default to everything remaining.
-
-Useful flags:
-
-- `--yes` never ask, take the defaults for everything contested
-- `--default join|split` what "everything contested" means, default `split`
-- `--replicas join|split` whether nets are common across copies, default `split`
-- `--ask-counts` ask how many copies of each design to place
-- `--link A=B:NAME` tie differently named nets together everywhere
-- `--connect 1:A0=2:SIGNAL` wire named designs' nets together
-- `--drop MOUNTINGHOLE` leave parts out; `--no-prune` skips the question
-- `--no-suggest` skip the differently-named-net questions
-- `--layout pack|grid|row|column` and `--optimize balanced|airwire|area|none`
-- `--outline 150x100`, or `keep` / `none`
-- `--gap 5` and `--columns 3`
-- `--prefix LEFT --prefix RIGHT` choose reference-designator prefixes yourself
-- `--save-plan used.json` record the answers you gave
-
-### plan
-
-Separate deciding from doing. Writes a JSON file of every decision, which you can
-edit by hand, commit, and replay.
-
-```bash
-pcbmerge plan examples/basic -o merge-plan.json
-$EDITOR merge-plan.json
-pcbmerge merge --plan merge-plan.json --out-dir out
-```
-
-Each entry says what it is and why:
-
-```json
-{
-  "key": "VIN",
-  "name": "VIN",
-  "action": "split",
-  "kind": "ambiguous",
-  "designs": ["Adafruit_MAX31850", "Adafruit_Non-Latching_Relay_Breakout"],
-  "note": "role-named rail; voltage differs between designs unless you say otherwise"
-}
-```
-
-Change `action` to `join` and set `name` to whatever the merged net should be
-called. Re-running with the same plan gives the same output every time.
-
-A plan also carries copy counts, hand-made links, and the layout settings:
-
-```json
-{
-  "designs": [{"name": "relay", "prefix": "RELAY_", "sch": "relay.sch", "count": 4}],
-  "links": [{"keys": ["SDA", "I2C_DATA"], "name": "BUS_SDA"}],
-  "connections": [{"members": [["esp32", "A0"], ["relay #1", "SIGNAL"]], "name": "A0"}],
-  "drops": ["MOUNTINGHOLE", "FIDUCIAL"],
-  "layout": "pack",
-  "optimize": "balanced",
-  "outline": "150x100"
-}
-```
-
-### web
-
-Open the visual front end described above.
-
-```bash
-pcbmerge web [folder] [--port 8765] [--no-browser]
-```
-
-### search
-
-```bash
-pcbmerge search [terms ...] [--vendor ORG] [--tool eagle|kicad] [--limit N] [--any]
-```
-
-Finds designs in the vendor accounts, listing each repository with what is inside
-it. Only repositories holding at least one design are shown. With no terms it lists
-the most popular in each account. `--vendor` is repeatable and takes either form of
-a name, `sparkfun` or `SparkFun`. `--tool` keeps only designs drawn with EAGLE or
-with KiCad. `--any` lists repositories without opening them.
-
-### fetch
-
-```bash
-pcbmerge fetch OWNER/NAME [--design NAME] [--all] [--dest DIR]
-```
-
-Lists the designs in a repository, or downloads them. A `github.com` URL works in
-place of `owner/name`. Without `--design` or `--all` nothing is written.
-
-### parts
-
-List every part, grouped by kind so a decision covers all its copies at once.
-Kinds nothing is wired to are starred.
-
-```bash
-pcbmerge parts examples/basic --all
-```
-
-### check
-
-Verify a `.sch`/`.brd` pair references nothing that does not exist. Works on any
-EAGLE pair, not just merged output, which is how you tell an inherited problem from
-one the merge introduced.
-
-```bash
-pcbmerge check out/combo
-```
-
-## What the merged files look like
-
-**Schematic.** One sheet holding every design, each captioned, with same-named
-nets folded into a single element.
-
-**Board.** Source boards are tiled into a packed arrangement inside a single
-outline, each moved as a rigid body so relative placement, rotation and routing
-survive intact. Joined nets appear as airwires spanning the sub-boards, which is
-the list of connections you still have to route.
-
-Each file keeps the layer table of its own kind. A schematic marks the copper
-layers hidden because it has no use for them, and a board needs exactly those
-layers switched on, so the two tables are not interchangeable.
-
-**Names.** Every part gets a short prefix from its design, so `R1` becomes
-`ESP32S3_R1`. Library items that clash by name but differ in content are kept side
-by side as `0603` and `0603$2`, with every reference rewritten to point at the copy
-its own design was drawn with.
-
-**Managed libraries.** Cloud library URNs are dropped, converting those parts to
-local copies. EAGLE would otherwise try to re-sync a library whose items have been
-renamed, and fail.
-
-## Working with the output
-
-The merged board is a starting point, not a finished layout. After opening it:
-
-1. Run ERC on the schematic and DRC on the board.
-2. Look at the airwires. Those are the joined nets, currently unrouted between
-   sub-boards.
-3. Adjust the arrangement if you want, and resize the outline to suit.
+Everything the page does is also on the command line. Run `pcbmerge --help`.
 
 ## Install
 
-Python 3.10 or newer, no dependencies.
+Python 3.10 or newer. No dependencies.
 
 ```bash
 pip install -e .
 ```
 
-That puts a `pcbmerge` command on your PATH. Check it with:
+That puts `pcbmerge` on your PATH:
 
 ```bash
 pcbmerge --version
 ```
 
-If you would rather click than type, `pcbmerge web` opens the visual front end.
+Reinstalling fails while `pcbmerge web` is running, because the server holds the
+executable. Stop it first.
 
-Run the tests with `pip install -e ".[dev]"` then `pytest`.
+## What it will not do
 
-## A first run
-
-Start with `inspect`, which writes nothing and tells you what a merge would do:
-
-```bash
-pcbmerge inspect examples/basic
-```
-
-Then merge. Without `--yes` it asks about parts to drop, connections to make and
-contested nets; with it, everything takes the documented default:
-
-```bash
-pcbmerge merge examples/basic -o combo --out-dir out --yes
-```
-
-You get `out/combo.sch` and `out/combo.brd`. Open the board in EAGLE, run DRC, and
-the airwires you see are the joined nets waiting to be routed.
-
-To check the result without opening EAGLE:
-
-```bash
-pcbmerge check out/combo
-```
-
-## Limitations
-
-- Writes EAGLE only. Reads EAGLE and KiCad; Altium is not supported.
-- Search covers the three vendor accounts only, and reads public repositories.
-- A repository too big for GitHub to list in one request is reported as
-  partial; some designs in it may not be shown.
-- Designs are placed by hand as whole blocks. Moving one part within a
-  design is a job for EAGLE, on the merged file.
-- KiCad buses and bus entries are not converted; a wired connection is.
-- A KiCad design with no usable `.kicad_sch` still falls back to boxes drawn from
-  the board netlist.
-- KiCad copper pours come across as their outline polygons, not as the filled shape
-  KiCad computed.
-- Design rules, autorouter settings and global attributes come from the first
-  design; conflicts elsewhere are reported as warnings, not merged.
-- Buses are copied per sheet but never joined across designs.
-- Placement search permutes which board goes where. It does not rotate boards or
-  attempt non-rectangular nesting.
-- Copper is never re-routed. Joined nets are left as airwires on purpose.
+- Writes EAGLE only. Altium is not supported.
+- Never re-routes copper. Joined nets are left as airwires on purpose.
+- Places designs as whole blocks. Moving one part within a design is a job for
+  EAGLE, on the merged file.
+- Takes design rules and global attributes from the first design. Conflicts
+  elsewhere are reported, not merged.
 
 ## Licence
 

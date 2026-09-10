@@ -716,8 +716,10 @@ def _library_index(doc: EagleDoc) -> dict[str, dict[str, set[str]]]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="pcbmerge",
-        description="Combine several EAGLE .sch/.brd designs into one, "
-                    "resolving net names automatically or by asking.",
+        description="Combine several PCB designs into one schematic and one "
+                    "board, resolving net names automatically where the answer "
+                    "is certain and asking where it is not. Reads EAGLE and "
+                    "KiCad; writes EAGLE.",
     )
     parser.add_argument("--no-color", action="store_true", help="plain output")
     from . import __version__

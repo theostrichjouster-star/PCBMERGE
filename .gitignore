@@ -13,4 +13,4 @@ downloads/
 # what a user installs.  Listed so a wholesale `git add` cannot put them back.
 CLAUDE.md
 tests/
-docs/design.md
+docs/
