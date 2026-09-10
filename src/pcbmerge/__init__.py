@@ -12,7 +12,7 @@ from .plan import ConnectDecision, DesignSpec, InstanceSpec, MergePlan, expand
 from .pruning import DropRule, PartGroup, PartRef, catalog
 from .sources import RemoteDesign, Repo, SourceError, VENDORS
 
-__version__ = "0.6.0"
+__version__ = "1.0.0"
 
 __all__ = [
     "Action", "ConnectDecision", "Design", "DesignSpec", "DropRule", "EagleDoc",

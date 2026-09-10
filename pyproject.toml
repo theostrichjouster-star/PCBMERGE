@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pcbmerge"
-version = "0.6.0"
+version = "1.0.0"
 description = "Combine multiple PCB designs into one schematic and board. Reads EAGLE and KiCad, writes EAGLE."
 readme = "README.md"
 requires-python = ">=3.10"
