@@ -229,7 +229,9 @@ That is what every other tool holding a GitHub token does. Encrypting it with
 nowhere to keep the key would only look like protection.
 
 An environment variable still works and takes precedence, which lets one shell
-override the saved token for a single run. It is set differently in each shell, and
+override the saved token for a single run. The panel keeps offering to save while
+a shell variable is supplying one, because that variable lasts only as long as the
+window it was typed in. It is set differently in each shell, and
 a token in the wrong place fails quietly:
 
 ```powershell

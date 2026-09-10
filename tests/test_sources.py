@@ -192,6 +192,34 @@ def test_the_page_is_told_about_the_token_and_never_told_it():
     assert "abcdefghijklmnop" not in json.dumps(state)
 
 
+def test_a_saved_token_is_reported_even_when_a_shell_is_winning(monkeypatch):
+    """The page keeps offering to save while a shell variable supplies one.
+
+    That variable lasts as long as the window it was typed in, and the whole
+    point of saving is the windows after this one, so hiding the control from
+    anyone who set the variable hides the feature from exactly the people who
+    wanted it.
+    """
+    sources.save_token("github_pat_the_saved_one")
+    monkeypatch.setenv("GITHUB_TOKEN", "github_pat_from_the_shell")
+
+    state = web._token_state()
+
+    assert state["tokenSource"] == "environment"
+    assert state["tokenSaved"] is True
+    assert state["savedHint"] == "..._one"
+
+
+def test_nothing_saved_is_reported_as_nothing_saved(monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "github_pat_from_the_shell")
+
+    state = web._token_state()
+
+    assert state["tokenSource"] == "environment"
+    assert state["tokenSaved"] is False
+    assert state["savedHint"] == ""
+
+
 def test_saving_through_the_page_checks_first(monkeypatch):
     monkeypatch.setattr(sources, "check_token",
                         lambda value: {"requests": 5000, "files": True})

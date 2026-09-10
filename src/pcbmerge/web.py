@@ -210,11 +210,13 @@ def _token_state() -> dict:
     Only the last four characters go out, which is enough to tell two apart
     and no use to anyone who gets hold of it.
     """
-    source = sources.token_source()
+    saved = sources.stored_token()
     return {
         "hasToken": bool(sources.token()),
-        "tokenSource": source,
+        "tokenSource": sources.token_source(),
         "tokenHint": sources.token_hint(),
+        "tokenSaved": bool(saved),
+        "savedHint": sources.token_hint(saved) if saved else "",
         "tokenPath": str(sources.token_path()),
     }
 

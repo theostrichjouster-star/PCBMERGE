@@ -754,7 +754,11 @@ function designKey(design) {
 /** The token control: what is in use, and how to change it.
 
     The page never receives a token, only whether there is one and its last
-    four characters, so there is nothing here worth intercepting. */
+    four characters, so there is nothing here worth intercepting.
+
+    The save control stays on offer even while a shell variable is supplying a
+    token, because that variable lasts as long as the window it was typed in
+    and the point of saving is the windows after this one. */
 function renderToken(data) {
   if (data) online.token = data;
   const state = online.token || {};
@@ -763,8 +767,22 @@ function renderToken(data) {
 
   if (state.tokenSource === "environment") {
     host.append(el("div", "sub",
-      `Using GITHUB_TOKEN from the environment (${state.tokenHint}). `
+      `Using GITHUB_TOKEN from this shell (${state.tokenHint}). `
       + "Searching files as well as names."));
+    if (state.tokenSaved) {
+      const row = el("div", "state");
+      row.append(el("span", "name",
+        `A token is also saved (${state.savedHint}), for windows where `
+        + "GITHUB_TOKEN is not set."));
+      const drop = el("button", "small", "Remove");
+      drop.onclick = () => saveToken({ remove: true });
+      row.append(drop);
+      host.append(row);
+    } else {
+      host.append(tokenForm(
+        "Save one to have it used in every run, including windows where "
+        + "GITHUB_TOKEN is not set. The shell variable still wins while it is set."));
+    }
     return;
   }
 
@@ -779,10 +797,18 @@ function renderToken(data) {
     return;
   }
 
-  host.append(el("div", "sub",
+  host.append(tokenForm(
     "Without a token GitHub allows a few searches an hour and will not search "
     + "files at all, which is where most KiCad hardware is found. A token needs "
     + "no permissions for public designs."));
+}
+
+/** The paste-and-save row, with whatever explanation suits the situation. */
+function tokenForm(explanation) {
+  const state = online.token || {};
+  const wrap = el("div", null);
+  wrap.append(el("div", "sub", explanation));
+
   const row = el("div", "row");
   const field = el("input");
   field.type = "password";
@@ -796,8 +822,9 @@ function renderToken(data) {
   const save = el("button", null, "Save");
   save.onclick = () => saveToken({ token: field.value });
   row.append(field, save);
-  host.append(row);
-  host.append(el("div", "sub", `Stored in ${state.tokenPath || "your settings"}`));
+  wrap.append(row);
+  wrap.append(el("div", "sub", `Stored in ${state.tokenPath || "your settings"}`));
+  return wrap;
 }
 
 async function saveToken(payload) {
