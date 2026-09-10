@@ -1555,7 +1555,9 @@ function drawBoard() {
     ["fill", stats.fill ? `${stats.fill}%` : "—"],
     ["airwire", stats.airwire ? `${Math.round(stats.airwire)} mm` : "—"]);
   $("foot-note").textContent =
-    `${board.placements.length} boards · ${board.airwires.length} nets span more than one`
+    `${count(board.placements.length, "board")} · `
+    + `${count(board.airwires.length, "net")} `
+    + `${board.airwires.length === 1 ? "spans" : "span"} more than one`
     + hint("board");
 }
 
@@ -1596,7 +1598,7 @@ function drawSheet() {
     null);
   $("foot-note").textContent = sheet.single
     ? "One design keeps the coordinates it was drawn at"
-    : `${sheet.blocks.length} drawings on one sheet` + hint("sheet");
+    : `${count(sheet.blocks.length, "drawing")} on one sheet` + hint("sheet");
 }
 
 /** Clear the canvas and say on it why there is nothing to see.
@@ -1622,6 +1624,11 @@ function blankStage(lines) {
     node.textContent = line;
     svg.append(node);
   });
+}
+
+/** "1 board", "2 boards". A count read out loud is worth getting right. */
+function count(n, noun) {
+  return `${n} ${noun}${n === 1 ? "" : "s"}`;
 }
 
 function hint(view) {

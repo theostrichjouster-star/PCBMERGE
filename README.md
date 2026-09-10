@@ -22,6 +22,10 @@ pcbmerge web
 
 That opens a page on `127.0.0.1:8765`. Nothing is written until you press Merge.
 
+![The pcbmerge web interface: two designs open on the left with the board
+settings and net decisions, and the merged board drawn on the right inside its
+outline](assets/web-ui.png)
+
 **Open a folder.** Choose folder opens your operating system's own dialog, or
 paste a path. Every design in it is listed, and you set how many copies of each
 you want.
