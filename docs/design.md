@@ -466,6 +466,6 @@ airwires without producing overlaps. `tests/test_linking.py` pins the scorer aga
 both the pairs it must find and the ones it must not.
 
 `tests/test_samples.py` runs the pipeline over the eight real Adafruit designs in
-`examples/adafruit`, checking that every library reference resolves, every reference
+`examples/basic`, checking that every library reference resolves, every reference
 designator is unique, no two boards overlap, and each source board survives as a
 rigid translation. It skips if the samples are absent.

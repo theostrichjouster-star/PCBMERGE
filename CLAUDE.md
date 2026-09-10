@@ -25,27 +25,32 @@ pytest -k kicad             # by name
 `pytest` works from the repo root without installing: `pyproject.toml` sets
 `pythonpath = ["src"]`.
 
-Exercising the tool against the real designs in `examples/adafruit` (eight EAGLE,
-one KiCad):
+Exercising the tool against the real designs in `examples/basic`, one drawn in
+EAGLE and one in KiCad, which is the point of the pair:
 
 ```bash
-pcbmerge inspect examples/adafruit
-pcbmerge merge examples/adafruit -o combo --out-dir out --yes
+pcbmerge inspect examples/basic
+pcbmerge merge examples/basic -o combo --out-dir out --yes
 pcbmerge check out/combo
-pcbmerge web examples/adafruit
+pcbmerge web examples/basic
 ```
 
 The search reaches the network, so it is exercised by hand rather than in the suite:
 
 ```bash
 pcbmerge search bme280
-pcbmerge fetch adafruit/Adafruit-BME280-Breakout-PCB --all --dest downloads
+pcbmerge fetch adafruit/Adafruit-BME280-Breakout-PCB --all --dest examples/basic
 ```
 
 `check` is the fast correctness gate: it verifies a `.sch`/`.brd` pair references
-nothing that does not exist. On the samples it reports exactly three problems, all
-orphan copper stubs inherited from `Adafruit MAX31850.brd`. **Three is the expected
-baseline; more means something regressed.**
+nothing that does not exist. **On the samples it reports `consistent`, and anything
+else is a regression.** `tests/test_samples.py` runs the same merge and asserts it,
+so the gate is not only a habit.
+
+The sample folder is meant to be swapped. Nothing in `tests/test_samples.py` names a
+design, a library or a net: each test derives what it needs from what is in the
+folder and asserts the rule rather than the answer. Keep it that way, or changing the
+examples turns a passing suite into a puzzle.
 
 Reinstall fails with a permissions error while `pcbmerge web` is running, because the
 server holds `pcbmerge.exe`. Stop the server first.
@@ -278,7 +283,7 @@ which runs the real placement but stops before producing XML.
 `tests/conftest.py` builds small synthetic EAGLE designs that clash deliberately — same part
 names, same library names with different pad geometry, a net set covering every bucket.
 `tests/test_kicad.py` does the same for KiCad with an inline board. `tests/test_samples.py`
-runs the pipeline over `examples/adafruit` and skips if absent.
+runs the pipeline over `examples/basic` and skips if absent.
 
 Tests assert behaviour and invariants, not incidental values. Derive prefixes from
 `collect_specs` rather than hardcoding them; they change when the naming heuristic does.

@@ -192,7 +192,7 @@ def designs(tmp_path: Path) -> Path:
 @pytest.fixture(scope="session")
 def samples() -> Path:
     """The real Adafruit designs, when they are present in the repo."""
-    path = Path(__file__).resolve().parent.parent / "examples" / "adafruit"
+    path = Path(__file__).resolve().parent.parent / "examples" / "basic"
     if not path.is_dir() or not list(path.glob("*.sch")):
         pytest.skip("sample designs not available")
     return path

@@ -10,7 +10,7 @@ source boards packed into a compact arrangement, and the power rails already tie
 together.
 
 ```bash
-pcbmerge merge examples/adafruit -o combo --out-dir out
+pcbmerge merge examples/basic -o combo --out-dir out
 ```
 
 Place several copies of a design by appending `*N`:
@@ -25,7 +25,7 @@ The command line makes you decide before you can see anything. `pcbmerge web`
 serves the same engine over HTTP so you can decide against a picture:
 
 ```bash
-pcbmerge web examples/adafruit
+pcbmerge web examples/basic
 ```
 
 That opens a browser on `127.0.0.1:8765` showing the merged board as it would be
@@ -116,8 +116,8 @@ ordinary input.
 
 ```bash
 pcbmerge search bme280
-pcbmerge fetch adafruit/Adafruit-BME280-Breakout-PCB --all --dest downloads
-pcbmerge merge downloads -o combo --out-dir out --yes
+pcbmerge fetch adafruit/Adafruit-BME280-Breakout-PCB --all --dest my-project
+pcbmerge merge my-project -o combo --out-dir out --yes
 ```
 
 ```
@@ -254,7 +254,7 @@ convert by hand. Point the tool at a folder holding both and it works out which 
 which.
 
 ```bash
-pcbmerge merge examples/adafruit -o combo --out-dir out --yes
+pcbmerge merge examples/basic -o combo --out-dir out --yes
 ```
 
 The board is the source of truth. A KiCad board carries the whole netlist, every
@@ -392,7 +392,7 @@ Answers default to no. To skip these questions entirely, pass `--no-suggest`.
 You can also state connections outright, which is what a plan records:
 
 ```bash
-pcbmerge merge examples/adafruit --link SDA=I2C_DATA:BUS_SDA --link SCL=I2C_CLK
+pcbmerge merge examples/basic --link SDA=I2C_DATA:BUS_SDA --link SCL=I2C_CLK
 ```
 
 A link naming a net no design has is an error rather than a silent no-op, because
@@ -408,7 +408,7 @@ the fiducials belong to panels that no longer exist.
 See what is there, grouped by kind:
 
 ```bash
-pcbmerge parts examples/adafruit
+pcbmerge parts examples/basic
 ```
 
 ```
@@ -426,7 +426,7 @@ Then leave kinds out with `--drop`, which matches the designator, the deviceset
 or the package, case-insensitively:
 
 ```bash
-pcbmerge merge examples/adafruit --drop MOUNTINGHOLE --drop FIDUCIAL --drop PLABEL
+pcbmerge merge examples/basic --drop MOUNTINGHOLE --drop FIDUCIAL --drop PLABEL
 ```
 
 Restrict a rule to one design with `esp32:FID*`. A rule matching nothing is an
@@ -522,7 +522,7 @@ own outline is discarded, because carrying eight of them over leaves a pile of
 overlapping rectangles rather than a board shape.
 
 ```bash
-pcbmerge merge examples/adafruit --outline 80x100
+pcbmerge merge examples/basic --outline 80x100
 ```
 
 | Value | Result |
@@ -567,7 +567,7 @@ the result. One sheet is what works, so one sheet is what there is.
 See what would happen before anything is written.
 
 ```bash
-pcbmerge inspect examples/adafruit
+pcbmerge inspect examples/basic
 ```
 
 Reports each design's copy count and prefix, the library items that will need
@@ -579,7 +579,7 @@ the differently named nets that might belong together.
 Do the work. Without `--yes` it asks about links, copies and contested nets.
 
 ```bash
-pcbmerge merge examples/adafruit -o combo --out-dir out
+pcbmerge merge examples/basic -o combo --out-dir out
 ```
 
 ```
@@ -615,7 +615,7 @@ Separate deciding from doing. Writes a JSON file of every decision, which you ca
 edit by hand, commit, and replay.
 
 ```bash
-pcbmerge plan examples/adafruit -o merge-plan.json
+pcbmerge plan examples/basic -o merge-plan.json
 $EDITOR merge-plan.json
 pcbmerge merge --plan merge-plan.json --out-dir out
 ```
@@ -685,7 +685,7 @@ List every part, grouped by kind so a decision covers all its copies at once.
 Kinds nothing is wired to are starred.
 
 ```bash
-pcbmerge parts examples/adafruit --all
+pcbmerge parts examples/basic --all
 ```
 
 ### check
@@ -753,14 +753,14 @@ Run the tests with `pip install -e ".[dev]"` then `pytest`.
 Start with `inspect`, which writes nothing and tells you what a merge would do:
 
 ```bash
-pcbmerge inspect examples/adafruit
+pcbmerge inspect examples/basic
 ```
 
 Then merge. Without `--yes` it asks about parts to drop, connections to make and
 contested nets; with it, everything takes the documented default:
 
 ```bash
-pcbmerge merge examples/adafruit -o combo --out-dir out --yes
+pcbmerge merge examples/basic -o combo --out-dir out --yes
 ```
 
 You get `out/combo.sch` and `out/combo.brd`. Open the board in EAGLE, run DRC, and
