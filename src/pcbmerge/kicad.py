@@ -226,10 +226,77 @@ def _drawn_schematic(stem: Path, design: str, packages: dict[str, ET.Element],
     package_of = {part.ref: part.package for part in parts}
     board_nets = {(part.ref, pad): net for part in parts for pad, net in part.pads}
     built = kicad_sch.build(drawing, pads, package_of, board_nets)
+    boxed = _box_the_undrawn(parts, pads, built)
 
     doc = _assemble_schematic(design, packages, built)
-    _note_drawn(source, drawing, built, notes)
+    _note_drawn(source, drawing, built, boxed, notes)
     return doc
+
+
+def _box_the_undrawn(parts: list[_Part], pad_names: dict[str, list[str]],
+                     built) -> list[str]:
+    """Give every footprint the drawing left out a box on the sheet.
+
+    A root sheet whose child sheets were not published draws some of the
+    board and none of the rest.  Writing only what was drawn leaves the
+    board full of elements the schematic has never heard of: the pair opens,
+    but nothing about those parts is decided on the schematic, and the
+    catalogue reads them as decoration because no pin reaches them.  So each
+    footprint with pads that has no drawn symbol gets the same box the
+    netlist route draws, placed beside the drawing, wired to its nets by
+    label.  A footprint with no pads at all is silkscreen, and stays where
+    silkscreen belongs: on the board only.
+    """
+    drawn = {row["name"] for row in built.parts}
+    undrawn = [p for p in parts if p.ref not in drawn and pad_names.get(p.package)]
+    if not undrawn:
+        return []
+
+    taken = set(built.symbols) | set(built.devicesets)
+    boxes: dict[str, str] = {}          # package -> the box symbol drawn for it
+    for part in undrawn:
+        if part.package in boxes:
+            continue
+        name = unique_name(part.package, taken)
+        taken.add(name)
+        boxes[part.package] = name
+        built.symbols[name] = _symbol(name, pad_names[part.package])
+        built.devicesets[name] = _deviceset(name, pad_names[part.package], part.package)
+    for part in undrawn:
+        built.parts.append({"name": part.ref, "deviceset": boxes[part.package],
+                            "device": "", "value": part.value})
+
+    # To the right of whatever was drawn, from its top edge down.
+    right, top = _drawn_extent(built)
+    holder = ET.Element("instances")
+    placed = _place_instances(holder, undrawn, pad_names, origin=(right, top))
+    built.instances.extend(list(holder))
+
+    # Into the nets the drawing already has, where the names meet: one net
+    # element per name per sheet is the only form EAGLE accepts.
+    nets = {net.get("name", ""): net for net in built.nets}
+    _wire_nets(nets, undrawn, pad_names, placed)
+    built.nets = list(nets.values())
+    built.unplaced = [name for name in built.unplaced if name not in nets]
+    return [part.ref for part in undrawn]
+
+
+def _drawn_extent(built) -> tuple[float, float]:
+    """Where the drawing ends on the right, and where it starts at the top."""
+    xs: list[float] = []
+    ys: list[float] = []
+    for node in [*built.instances, *built.nets, *built.plain]:
+        for item in node.iter():
+            for xa, ya in (("x", "y"), ("x1", "y1"), ("x2", "y2")):
+                if item.get(xa) is not None and item.get(ya) is not None:
+                    try:
+                        xs.append(float(item.get(xa)))
+                        ys.append(float(item.get(ya)))
+                    except ValueError:
+                        continue
+    if not xs:
+        return 0.0, 0.0
+    return max(xs) + COLUMN_WIDTH, max(ys)
 
 
 def _note_nothing_drawn(source: Path, drawing, notes: list[str]) -> None:
@@ -244,15 +311,20 @@ def _note_nothing_drawn(source: Path, drawing, notes: list[str]) -> None:
             f"from the board netlist")
 
 
-def _note_drawn(source: Path, drawing, built, notes: list[str]) -> None:
+def _note_drawn(source: Path, drawing, built, boxed: list[str],
+                notes: list[str]) -> None:
     notes.append(
         f"{source.name}: schematic converted as drawn -- "
-        f"{len(built.instances)} symbols, {len(drawing.wires)} wires, "
+        f"{len(built.instances) - len(boxed)} symbols, {len(drawing.wires)} wires, "
         f"{len(built.nets)} nets")
     if drawing.missing:
         missing = ", ".join(sorted(set(drawing.missing))[:4])
         notes.append(f"{source.name}: child sheet(s) not found and left out "
                      f"({missing})")
+    if boxed:
+        notes.append(
+            f"{source.name}: {len(boxed)} footprint(s) the drawing does not show "
+            f"were added beside it as boxes, one pin per pad")
     if built.unplaced:
         notes.append(
             f"{source.name}: {len(built.unplaced)} board net(s) are not drawn on "
@@ -964,7 +1036,10 @@ def _build_schematic(design: str, packages: dict[str, ET.Element],
         holder.tail = "\n"
 
     placed = _place_instances(sheet.find("instances"), parts, pad_names)
-    _wire_nets(sheet.find("nets"), parts, pad_names, placed)
+    nets: dict[str, ET.Element] = {}
+    _wire_nets(nets, parts, pad_names, placed)
+    for name in sorted(nets):
+        sheet.find("nets").append(nets[name])
 
     doc = EagleDoc(path=Path(f"{design}.sch"), tree=ET.ElementTree(root), kind="sch")
     return doc
@@ -1008,7 +1083,14 @@ def _symbol(name: str, pads: list[str]) -> ET.Element:
     return symbol
 
 
-def _deviceset(name: str, pads: list[str]) -> ET.Element:
+def _deviceset(name: str, pads: list[str], package: str | None = None) -> ET.Element:
+    """A deviceset with one gate on the box symbol and one device on the package.
+
+    The box is usually named after the package.  When that name is taken on
+    the sheet by a drawn symbol, the box gets another name and the device
+    still has to point at the real package.
+    """
+    package = package or name
     deviceset = ET.Element("deviceset", {"name": name, "uservalue": "yes"})
     deviceset.text = "\n"
     deviceset.tail = "\n"
@@ -1021,7 +1103,7 @@ def _deviceset(name: str, pads: list[str]) -> ET.Element:
     devices = ET.SubElement(deviceset, "devices")
     devices.text = "\n"
     devices.tail = "\n"
-    device = ET.SubElement(devices, "device", {"name": "", "package": name})
+    device = ET.SubElement(devices, "device", {"name": "", "package": package})
     device.text = "\n"
     device.tail = "\n"
     connects = ET.SubElement(device, "connects")
@@ -1040,20 +1122,21 @@ def _deviceset(name: str, pads: list[str]) -> ET.Element:
 
 
 def _place_instances(holder: ET.Element, parts: list[_Part],
-                     pad_names: dict[str, list[str]]) -> dict[str, tuple[float, float]]:
+                     pad_names: dict[str, list[str]],
+                     origin: tuple[float, float] = (0.0, 0.0)) -> dict[str, tuple[float, float]]:
     """Lay the boxes out in columns, tallest-aware, and remember where they went."""
     placed: dict[str, tuple[float, float]] = {}
-    x = 0.0
-    y = 0.0
-    column_bottom = 0.0
+    x = origin[0]
+    y = origin[1]
+    column_bottom = y
     per_column = 0
 
     for part in parts:
         pads = pad_names.get(part.package, [])
         height = PIN_PITCH * (len(pads) + 2) + BLOCK_GAP
-        if per_column and y - height < -254.0:
+        if per_column and y - height < origin[1] - 254.0:
             x += COLUMN_WIDTH
-            y = 0.0
+            y = origin[1]
             per_column = 0
         instance = ET.SubElement(holder, "instance", {
             "part": part.ref, "gate": "G$1", "x": fmt(x), "y": fmt(y)})
@@ -1065,19 +1148,27 @@ def _place_instances(holder: ET.Element, parts: list[_Part],
     return placed
 
 
-def _wire_nets(holder: ET.Element, parts: list[_Part],
+def _wire_nets(nets: dict[str, ET.Element], parts: list[_Part],
                pad_names: dict[str, list[str]],
                placed: dict[str, tuple[float, float]]) -> None:
-    """Attach a labelled stub to every pin, which is how EAGLE joins by name."""
+    """Attach a labelled stub to every pin, which is how EAGLE joins by name.
+
+    Segments go into the net of that name in `nets`, made if it is not there
+    yet, so a box wired beside a drawing joins the drawing's own net rather
+    than standing up a second one of the same name.
+    """
     by_net: dict[str, list[tuple[str, str]]] = {}
     for part in parts:
         for pad, net in part.pads:
             by_net.setdefault(net, []).append((part.ref, pad))
 
     for net_name in sorted(by_net):
-        net = ET.SubElement(holder, "net", {"name": net_name, "class": "0"})
-        net.text = "\n"
-        net.tail = "\n"
+        net = nets.get(net_name)
+        if net is None:
+            net = ET.Element("net", {"name": net_name, "class": "0"})
+            net.text = "\n"
+            net.tail = "\n"
+            nets[net_name] = net
         for ref, pad in by_net[net_name]:
             spot = placed.get(ref)
             part = next((p for p in parts if p.ref == ref), None)

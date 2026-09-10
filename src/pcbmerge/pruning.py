@@ -52,14 +52,19 @@ class PartRef:
 
     @property
     def kind(self) -> str:
-        """The part's type, with any copy number folded away.
+        """The part's type, with any copy number or generated id folded away.
 
         PLABEL0 through PLABEL32 are one kind of thing to anyone deciding
-        whether to keep them, so they are catalogued as one.
+        whether to keep them, so they are catalogued as one.  So are the
+        silkscreen labels a KiCad plugin stamps as KIBUZZARD-6569BE4A,
+        KIBUZZARD-6569BE57 and so on: the hex tail is an id, not a kind.
         """
         base = (self.deviceset or self.package or "?").upper()
         stem = re.fullmatch(r"([A-Z]{3,})(\d+)", base)
-        return stem.group(1) if stem else base
+        if stem:
+            return stem.group(1)
+        tagged = re.fullmatch(r"(.+?)[-_][0-9A-F]{6,}", base)
+        return tagged.group(1) if tagged else base
 
     def key(self) -> tuple[str, str]:
         """What makes two parts the same kind of thing.
@@ -140,10 +145,19 @@ def _refs_for(design) -> list[PartRef]:
         name = pinref.get("part", "")
         used[name] = used.get(name, 0) + 1
 
+    # What the copper reaches counts too.  A footprint the schematic never
+    # mentions can still have tracks on its pads, and a part with tracks on
+    # it is not decoration whatever the schematic says.
+    wired: dict[str, int] = {}
     packages: dict[str, str] = {}
+    values: dict[str, str] = {}
     if design.brd is not None:
         for element in design.brd.elements():
             packages[element.get("name", "")] = element.get("package", "")
+            values[element.get("name", "")] = element.get("value", "") or ""
+        for contact in design.brd.section.iterfind("signals/signal//contactref"):
+            name = contact.get("element", "")
+            wired[name] = wired.get(name, 0) + 1
 
     refs: list[PartRef] = []
     seen: set[str] = set()
@@ -154,17 +168,20 @@ def _refs_for(design) -> list[PartRef]:
             design=design.name, source=design.source, name=name,
             library=part.get("library", ""), deviceset=part.get("deviceset", ""),
             package=packages.get(name, ""), value=part.get("value", "") or "",
-            pins=used.get(name, 0), on_schematic=True, on_board=name in packages,
+            pins=max(used.get(name, 0), wired.get(name, 0)),
+            on_schematic=True, on_board=name in packages,
         ))
 
     for name, package in packages.items():
         if name in seen:
             continue
         # A footprint placed straight onto the board: silkscreen labels,
-        # logos, the odd mounting hole.
+        # logos, the odd mounting hole; or, on a board whose schematic was
+        # only partly published, a real part.
         refs.append(PartRef(
             design=design.name, source=design.source, name=name,
-            package=package, value="", pins=0, on_schematic=False, on_board=True,
+            package=package, value=values.get(name, ""), pins=wired.get(name, 0),
+            on_schematic=False, on_board=True,
         ))
     return refs
 
