@@ -5,3 +5,9 @@ out/
 .pytest_cache/
 merge-plan.json
 downloads/
+
+# Kept on this machine, deliberately not published: the guidance file is
+# written for whoever works on the code here, and the suite is not part of
+# what a user installs.  Listed so a wholesale `git add` cannot put them back.
+CLAUDE.md
+tests/
